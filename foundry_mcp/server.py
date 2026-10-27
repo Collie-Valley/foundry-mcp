@@ -23,6 +23,7 @@ import binascii
 import mimetypes
 import sys
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
@@ -348,7 +349,7 @@ def _prepare(ctx: Ctx, agent_model: str = "") -> FoundryClient:
     client.reauth = lambda: _reauth(ctx)
     if client.token is None:
         client.token = _keyring_get()  # siembra optimista; si expiró, el 401 dispara reauth
-    set_agent_identity(_agent_source(ctx), _resolve_agent_model(agent_model))
+    set_agent_identity(_agent_source(ctx), _resolve_agent_model(agent_model, ctx=ctx))
     return client
 
 
@@ -415,20 +416,43 @@ def _agent_source(ctx: Ctx) -> str:
 # adjuntos…), porque la identidad viaja en las cabeceras de cada petición.
 _declared_model = ""
 
+# Dónde dice cada cliente, en el `_meta` de la petición, con qué modelo trabaja (FNV-319). Codex lo
+# manda en cada `tools/call`: lo pone el cliente, no el modelo hablando de sí mismo (que se
+# declaraba «gpt-6» corriendo «gpt-6-luna»), y sigue un cambio de `/model` a mitad de sesión.
+# Claude Code y OpenCode no mandan nada parecido.
+_CLIENT_MODEL_IN_META = (("x-codex-turn-metadata", "model"),)
 
-def _resolve_agent_model(explicit: str = "") -> str | None:
-    """Modelo de esta llamada → el declarado antes en la sesión → configuración → desconocido.
 
-    MCP no incluye el modelo en ``clientInfo`` y ningún cliente lo exporta a sus servidores, así
-    que solo lo sabe el agente. Basta con que lo diga una vez (lo normal: en ``whoami``); un valor
-    nuevo sustituye al anterior, porque se puede cambiar de modelo sin cerrar la sesión.
+def _client_model(ctx: Ctx | None) -> str | None:
+    """El modelo que el cliente dice en la petición en curso, si lo dice."""
+    try:
+        meta = getattr(getattr(ctx, "request_context", None), "meta", None)
+    except ValueError:  # el Context del SDK fuera de una petición
+        return None
+    if not isinstance(meta, Mapping):
+        return None
+    for block_key, model_key in _CLIENT_MODEL_IN_META:
+        block = meta.get(block_key)
+        model = block.get(model_key) if isinstance(block, Mapping) else None
+        if isinstance(model, str) and model.strip():
+            return model.strip()[:160]
+    return None
+
+
+def _resolve_agent_model(explicit: str = "", *, ctx: Ctx | None = None) -> str | None:
+    """Lo que dice el cliente → lo declarado en esta llamada o antes en la sesión → configuración.
+
+    MCP no tiene un campo para el modelo, pero algunos clientes lo mandan en el `_meta` de cada
+    petición, y eso manda: es un dato del cliente. Si no, lo sabe el agente: basta con que lo diga
+    una vez (lo normal: en ``whoami``); un valor nuevo sustituye al anterior, porque se puede
+    cambiar de modelo sin cerrar la sesión.
     """
 
     global _declared_model
     value = explicit.strip()[:160]
     if value:
         _declared_model = value
-    return _declared_model or load_config().agent_model.strip()[:160] or None
+    return _client_model(ctx) or _declared_model or load_config().agent_model.strip()[:160] or None
 
 
 async def _add_agent_comment(
@@ -450,7 +474,7 @@ async def _add_agent_comment(
         entry_kind=entry_kind,
         meta=meta,
         agent_source=_agent_source(ctx),
-        agent_model=_resolve_agent_model(agent_model),
+        agent_model=_resolve_agent_model(agent_model, ctx=ctx),
     )
 
 
@@ -669,7 +693,8 @@ async def whoami(ctx: Ctx, agent_model: str = "") -> dict[str, Any]:
     durante la sesión, aunque no lo repitas. `agente` devuelve lo que quedará registrado.
     """
     me = await _prepare(ctx, agent_model).me()
-    return {**me, "agente": {"agent_source": _agent_source(ctx), "agent_model": _resolve_agent_model()}}
+    agente = {"agent_source": _agent_source(ctx), "agent_model": _resolve_agent_model(ctx=ctx)}
+    return {**me, "agente": agente}
 
 
 @mcp.tool(annotations=SOLO_LEE)
@@ -1159,7 +1184,7 @@ async def create_task(
         "issue_type": _validate(issue_type, ISSUE_TYPES, "issue_type"),
         "as_agent": True,  # el MCP es la IA: la tarjeta declara su procedencia (FNV-109)
         "agent_source": _agent_source(ctx),
-        "agent_model": _resolve_agent_model(agent_model),
+        "agent_model": _resolve_agent_model(agent_model, ctx=ctx),
     }
     if parent_id:
         body["parent_id"] = parent_id
@@ -1217,7 +1242,7 @@ async def edit_task(
         "kind": _validate(kind, KINDS, "kind") if kind is not None else task["kind"],
         "as_agent": True,
         "agent_source": _agent_source(ctx),
-        "agent_model": _resolve_agent_model(agent_model),
+        "agent_model": _resolve_agent_model(agent_model, ctx=ctx),
     }
     if assignee is None:
         body["assignee_id"] = task.get("assignee_id")
@@ -1381,7 +1406,7 @@ async def report_progress(
         entry_kind="avance",
         meta=meta or None,
         agent_source=_agent_source(ctx),
-        agent_model=_resolve_agent_model(agent_model),
+        agent_model=_resolve_agent_model(agent_model, ctx=ctx),
     )
 
 
@@ -1407,7 +1432,7 @@ async def flag_blocker(
         entry_kind="bloqueo",
         meta=meta or None,
         agent_source=_agent_source(ctx),
-        agent_model=_resolve_agent_model(agent_model),
+        agent_model=_resolve_agent_model(agent_model, ctx=ctx),
     )
 
 
