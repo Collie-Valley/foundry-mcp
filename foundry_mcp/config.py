@@ -45,8 +45,10 @@ class Config:
 
 
 def load_config() -> Config:
-    # Algunos clientes ya exponen el modelo en su entorno; FOUNDRY_AGENT_MODEL manda cuando se
-    # necesita corregirlo. El override por llamada de herramienta sigue teniendo mayor prioridad.
+    # Ningún cliente exporta hoy su modelo a los servidores MCP (comprobado en Claude Code, Codex
+    # 0.160 y OpenCode 1.18, FNV-311): estas variables solo tienen valor si alguien las pone a mano.
+    # FOUNDRY_AGENT_MODEL es la propia; las demás se aceptan como sinónimos por compatibilidad. Lo
+    # que el agente declare (por llamada o en `whoami`) manda sobre todas ellas.
     detected_model = next(
         (
             value

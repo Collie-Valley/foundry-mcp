@@ -94,7 +94,7 @@ cliente) o, si trabajas con una copia del código, en un `.env` en su raíz.
 | `FOUNDRY_API_BASE` | Otro backend: el tuyo en local (`http://localhost:8000/api/v1`) o uno propio. Por omisión, `https://foundry.collie.digital/api/v1`. |
 | `FOUNDRY_TIMEOUT` | Segundos de espera a la API (30 por omisión). |
 | `FOUNDRY_AGENT_SOURCE` | Qué cliente firma lo que crea el agente. `auto` lo deduce de la sesión MCP; si tu cliente se anuncia con un nombre genérico, fíjalo (`codex`, `claude_code`, `opencode`, `gemini`…). |
-| `FOUNDRY_AGENT_MODEL` | El modelo que usa el agente, si es siempre el mismo. |
+| `FOUNDRY_AGENT_MODEL` | El modelo que usa el agente, si es siempre el mismo. Lo que el agente declare en la sesión manda sobre esto. |
 | `FOUNDRY_TOKEN`, o `FOUNDRY_EMAIL` + `FOUNDRY_PASSWORD` | Solo para automatización o para clientes sin diálogo: el MCP entra sin preguntar. Para uso normal, no los definas. |
 
 ## Identidad del agente
@@ -103,14 +103,23 @@ Todo lo que crea el MCP (descripciones, comentarios, avances, verificaciones y c
 historial) queda marcado como hecho por una IA, con dos datos aparte:
 
 - **`agent_source`**: qué cliente lo hizo (`claude_code`, `codex`, `opencode`, `gemini`, `other` o
-  `unknown`).
-- **`agent_model`**: con qué modelo, por ejemplo `claude-sonnet-*` o `gpt-5`.
+  `unknown`). Sale solo, del nombre con el que se presenta el cliente: Claude Code (`claude-code`),
+  Codex (`codex-mcp-client`) y OpenCode (`opencode`) se reconocen sin configurar nada.
+- **`agent_model`**: con qué modelo, por ejemplo `claude-opus-5-5` o `gpt-6-luna`.
 
-Foundry lo enseña como `IA · Codex · gpt-5` junto a cada aporte, así que no hace falta firmar el
-texto. MCP no estandariza el modelo, así que conviene declararlo: con `FOUNDRY_AGENT_MODEL` si el
-proceso usa siempre el mismo, o con el argumento `agent_model` de cada herramienta si cambia
-durante la sesión. El servidor también reconoce `CODEX_MODEL`, `CLAUDE_MODEL`, `ANTHROPIC_MODEL`,
-`OPENCODE_MODEL` y `GEMINI_MODEL`.
+Foundry lo enseña como `IA · Codex · gpt-6-luna` junto a cada aporte, así que no hace falta firmar
+el texto.
+
+**El modelo hay que declararlo.** MCP no tiene un campo para él y ningún cliente se lo pasa a sus
+servidores, así que solo lo sabe el agente. Basta con decirlo **una vez**: al empezar, con
+`whoami(agent_model="…")`, o con el argumento `agent_model` de cualquier herramienta. El servidor lo
+recuerda y lo pone en todo lo que el agente haga durante la sesión, también en las herramientas que
+no tienen ese argumento (notas, columnas, adjuntos). Si se cambia de modelo a mitad de sesión, basta
+con declararlo de nuevo: manda el último. El prompt `trabajar_tarjeta` ya lo pide como primer paso.
+
+Si el proceso usa siempre el mismo modelo, también puede fijarse con `FOUNDRY_AGENT_MODEL`. Por
+compatibilidad se aceptan `CODEX_MODEL`, `CLAUDE_MODEL`, `ANTHROPIC_MODEL`, `OPENCODE_MODEL` y
+`GEMINI_MODEL`, pero solo si las defines tú: los clientes no las rellenan.
 
 La identidad la **declara el cliente**: no es una certificación y no da permisos. Lo que puede
 hacer el agente lo decide el rol de la cuenta.

@@ -109,10 +109,9 @@ mcp = FastMCP(
         f"Cada tablero tiene SUS columnas ({COLUMN_SETS_HINT}): míralas con `get_board` en vez de "
         "suponerlas, y fíjate en la `category` de cada una (`todo`/`in_progress`/`done`), que es lo "
         "único estable — el nombre lo cambia quien quiera. Al crear una tarjeta sin `column`, nace "
-        "en la columna de entrada del tablero. Al registrar un comentario, avance, bloqueo o "
-        "verificación, declara "
-        "`agent_model` si conoces el modelo actual; si no, el servidor usa su configuración. "
-        "El backend valida permisos por rol."
+        "en la columna de entrada del tablero. Declara tu modelo una vez, al empezar, con "
+        "`whoami(agent_model=...)`: el servidor lo recuerda y lo pone en todo lo que hagas en la "
+        "sesión, sin firmar los textos. El backend valida permisos por rol."
     ),
 )
 # FastMCP 1.x no deja pasar la versión y, sin ella, el servidor se anuncia con la del SDK (`mcp`
@@ -335,15 +334,26 @@ def _agent_source(ctx: Ctx) -> str:
     )
 
 
-def _resolve_agent_model(explicit: str = "") -> str | None:
-    """Modelo declarado por llamada → configuración del proceso → desconocido.
+# El modelo que el agente ha declarado en esta sesión (FNV-311). Por stdio el cliente arranca un
+# proceso por sesión, así que el módulo ES la sesión: lo declarado una vez vale para todo lo que
+# venga después, también para las herramientas que no tienen el parámetro (notas, columnas,
+# adjuntos…), porque la identidad viaja en las cabeceras de cada petición.
+_declared_model = ""
 
-    MCP no incluye el modelo en ``clientInfo``. El override por llamada permite que un mismo
-    cliente cambie de modelo sin reiniciar el servidor.
+
+def _resolve_agent_model(explicit: str = "") -> str | None:
+    """Modelo de esta llamada → el declarado antes en la sesión → configuración → desconocido.
+
+    MCP no incluye el modelo en ``clientInfo`` y ningún cliente lo exporta a sus servidores, así
+    que solo lo sabe el agente. Basta con que lo diga una vez (lo normal: en ``whoami``); un valor
+    nuevo sustituye al anterior, porque se puede cambiar de modelo sin cerrar la sesión.
     """
 
-    value = explicit.strip() or load_config().agent_model.strip()
-    return value[:160] or None
+    global _declared_model
+    value = explicit.strip()[:160]
+    if value:
+        _declared_model = value
+    return _declared_model or load_config().agent_model.strip()[:160] or None
 
 
 async def _add_agent_comment(
@@ -553,9 +563,15 @@ async def logout() -> str:
 
 # ── tools: lectura ───────────────────────────────────────────────────────────
 @mcp.tool(annotations=SOLO_LEE)
-async def whoami(ctx: Ctx) -> dict[str, Any]:
-    """Cuenta con la que actúa el MCP (id, email, nombre). Verifica la sesión/credenciales."""
-    return await _prepare(ctx).me()
+async def whoami(ctx: Ctx, agent_model: str = "") -> dict[str, Any]:
+    """Cuenta con la que actúa el MCP (id, email, nombre) y con qué identidad firma el agente.
+
+    Llámala al empezar **declarando `agent_model`** (el modelo con el que trabajas, p. ej.
+    `claude-opus-5-5` o `gpt-6-luna`): el servidor lo recuerda y lo pone en todo lo que hagas
+    durante la sesión, aunque no lo repitas. `agente` devuelve lo que quedará registrado.
+    """
+    me = await _prepare(ctx, agent_model).me()
+    return {**me, "agente": {"agent_source": _agent_source(ctx), "agent_model": _resolve_agent_model()}}
 
 
 @mcp.tool(annotations=SOLO_LEE)
@@ -2177,6 +2193,8 @@ def trabajar_tarjeta(initiative_id: str, task_id: str) -> str:
     """El rito de principio a fin sobre una tarjeta concreta."""
     return f"""Trabaja la tarjeta {task_id} del tablero {initiative_id} siguiendo este ciclo:
 
+0. **Di con qué modelo trabajas.** Llama a `whoami` con `agent_model` (tu modelo exacto): queda
+   en todo lo que hagas en la sesión, y así cada aporte dice qué IA lo hizo.
 1. **Entérate antes de tocar nada.** Lee la tarjeta con `get_board`, su historial con
    `get_task_comments`, sus criterios con `list_criteria` y sus casos de prueba con
    `list_test_cases`. Lo que ya se decidió no se vuelve a decidir.
