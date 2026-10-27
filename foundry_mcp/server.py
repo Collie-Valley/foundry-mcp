@@ -30,6 +30,7 @@ from mcp.server.session import ServerSession
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
+from foundry_mcp import __version__
 from foundry_mcp.config import load_config
 from foundry_mcp.foundry import FoundryClient, FoundryError, set_agent_identity
 
@@ -114,6 +115,9 @@ mcp = FastMCP(
         "El backend valida permisos por rol."
     ),
 )
+# FastMCP 1.x no deja pasar la versión y, sin ella, el servidor se anuncia con la del SDK (`mcp`
+# 1.30.0): los clientes que la registran no distinguían una 0.1.0 de una 0.1.1 (FNV-315).
+mcp._mcp_server.version = __version__
 
 
 class LoginForm(BaseModel):
