@@ -14,12 +14,13 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, patch
 
+from mcp.server.elicitation import render_elicitation_schema
 from mcp.server.mcpserver import Elicit
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 from foundry_mcp import server
 from foundry_mcp.foundry import FoundryError
-from foundry_mcp.server import LoginForm
+from foundry_mcp.server import ConfirmForm, LoginForm
 
 PREGUNTA: Any = SimpleNamespace(client_capabilities=SimpleNamespace(elicitation=SimpleNamespace()))
 NO_PREGUNTA: Any = SimpleNamespace(client_capabilities=None)
@@ -46,6 +47,19 @@ class ResolvedParametersTests(IsolatedAsyncioTestCase):
         login = server.mcp._tool_manager.get_tool("login")
         assert login is not None
         self.assertEqual(set(login.resolved_params), {"credenciales"})
+
+
+class ElicitationSchemaTests(TestCase):
+    def test_the_forms_send_only_what_the_spec_allows_at_the_root(self) -> None:
+        """La especificación solo admite `$schema`, `type`, `properties` y `required` en la raíz del
+        formulario. Codex se ciñe a eso: con un `title` de más no enseña el diálogo y lo cancela solo,
+        así que ni se podía entrar ni confirmar un borrado (salió manejando Codex en FNV-314)."""
+        for form in (LoginForm, ConfirmForm):
+            with self.subTest(form=form.__name__):
+                schema = render_elicitation_schema(form)
+                self.assertLessEqual(set(schema), {"$schema", "type", "properties", "required"})
+                self.assertEqual(schema["type"], "object")
+                self.assertTrue(schema["properties"])
 
 
 class LoginResolverTests(TestCase):

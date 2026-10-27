@@ -29,7 +29,7 @@ from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context, Elicit, ElicitationResult, Image, MCPServer, Resolve
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from foundry_mcp import __version__
 from foundry_mcp.config import load_config
@@ -126,8 +126,23 @@ mcp = MCPServer(
 )
 
 
-class LoginForm(BaseModel):
-    """Formulario que Claude Code muestra al usuario para iniciar sesión en Foundry."""
+def _solo_lo_que_admite_el_spec(schema: dict[str, Any]) -> None:
+    # Pydantic pone en la raíz el nombre de la clase (`title`) y su docstring (`description`), y el
+    # SDK los deja pasar. La especificación solo admite `$schema`, `type`, `properties` y `required`:
+    # Claude Code no se queja, pero Codex no sabe pintar el formulario y lo cancela sin enseñarlo
+    # (FNV-314). Los campos sí llevan su título y descripción, que es lo que se ve en el diálogo.
+    schema.pop("title", None)
+    schema.pop("description", None)
+
+
+class Formulario(BaseModel):
+    """Lo que el MCP le pregunta a la persona por el cliente (elicitation)."""
+
+    model_config = ConfigDict(json_schema_extra=_solo_lo_que_admite_el_spec)
+
+
+class LoginForm(Formulario):
+    """Formulario que el cliente muestra al usuario para iniciar sesión en Foundry."""
 
     email: str = Field(default="", description="Email de tu cuenta de Foundry.")
     password: str = Field(default="", description="Contraseña (o déjala vacía y pega un token abajo).")
@@ -198,7 +213,7 @@ def _token_alive(token: str) -> bool:
         return False
 
 
-class ConfirmForm(BaseModel):
+class ConfirmForm(Formulario):
     """Lo que se le enseña a la persona antes de algo que no se puede deshacer (FNV-269)."""
 
     confirmar: bool = Field(
