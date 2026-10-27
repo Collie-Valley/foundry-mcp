@@ -22,13 +22,13 @@ def _pyproject_version() -> str:
 class ServerInfoTests(TestCase):
     def test_announced_version_is_the_package_one(self) -> None:
         """Lo que ve el cliente en `serverInfo.version` es lo que se publicó en PyPI."""
-        options = server.mcp._mcp_server.create_initialization_options()
+        options = server.mcp._lowlevel_server.create_initialization_options()
         self.assertEqual(options.server_name, "foundry-boards")
         self.assertEqual(options.server_version, _pyproject_version())
 
     def test_it_is_not_the_sdk_version(self) -> None:
         """El síntoma del bug: se anunciaba 1.30.0, que es la versión del paquete `mcp`."""
-        options = server.mcp._mcp_server.create_initialization_options()
+        options = server.mcp._lowlevel_server.create_initialization_options()
         self.assertNotEqual(options.server_version, installed_version("mcp"))
 
     def test_dunder_version_follows_pyproject(self) -> None:

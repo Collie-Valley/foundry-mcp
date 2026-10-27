@@ -23,11 +23,11 @@ import binascii
 import mimetypes
 import sys
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from mcp.server.fastmcp import Context, FastMCP, Image
-from mcp.server.session import ServerSession
+from mcp.server.mcpserver import Context, Elicit, ElicitationResult, Image, MCPServer, Resolve
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
@@ -35,10 +35,11 @@ from foundry_mcp import __version__
 from foundry_mcp.config import load_config
 from foundry_mcp.foundry import FoundryClient, FoundryError, set_agent_identity
 
-# El contexto de cada llamada, con los parámetros que pide mypy estricto: la sesión del servidor y
-# un lifespan que no usamos. FastMCP lo inyecta reconociendo esta anotación, así que cambiarla puede
-# convertir `ctx` en un argumento de todas las herramientas: lo vigila tests/test_context_injection.py.
-Ctx = Context[ServerSession, None]
+# El contexto de cada llamada, con los parámetros que pide mypy estricto: un lifespan que no usamos
+# y el tipo de petición, que depende del transporte. El SDK lo inyecta reconociendo esta anotación,
+# así que cambiarla puede convertir `ctx` en un argumento de todas las herramientas: lo vigila
+# tests/test_context_injection.py.
+Ctx = Context[Any, Any]
 
 # Prioridad de 5 niveles (ADR-0014, E3·B). Se aceptan también los 3 antiguos (baja/media/alta): el
 # backend los normaliza a low/medium/high.
@@ -61,11 +62,11 @@ COLUMN_CATEGORIES = ("todo", "in_progress", "done")
 # preguntar. **Callar no es neutral**: lo no declarado se asume destructivo, así que un servidor sin
 # etiquetas hace que leer un tablero pese lo mismo que borrar una tarjeta — y quien aprueba deja de
 # mirar. Describen la operación; no protegen nada: los permisos siguen siendo del backend.
-SOLO_LEE = ToolAnnotations(readOnlyHint=True)
-CREA = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False)
+SOLO_LEE = ToolAnnotations(read_only_hint=True)
+CREA = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
 # Deja un valor concreto: repetirla con los mismos datos no cambia nada más (se puede reintentar).
-ACTUALIZA = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True)
-BORRA = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
+ACTUALIZA = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True)
+BORRA = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False)
 # Las columnas NO son un juego fijo (FNV-256): cada tablero nace de una de las siete plantillas o
 # de unas columnas montadas a mano, y además se cambian cuando se quiera. No se suponen —se leen del
 # tablero con `get_board`— y, al crear sin `column`, la de entrada se deduce con
@@ -96,8 +97,12 @@ _TEXTUAL_TYPES = frozenset(
 _KEYRING_SERVICE = "foundry-boards-mcp"
 _KEYRING_USER = "token"
 
-mcp = FastMCP(
+mcp = MCPServer(
     "foundry-boards",
+    # Sin ella, el servidor se anunciaba con la versión del SDK y los clientes que la registran no
+    # distinguían una 0.1.0 de una 0.1.1 (FNV-315).
+    version=__version__,
+    website_url="https://foundry.collie.digital",
     instructions=(
         "Administra los tableros de Foundry (vivero colaborativo de ideas → iniciativas) con un "
         "modelo de gestión de trabajo ágil. Úsalo para ver/crear/reorganizar tableros y sus "
@@ -119,9 +124,6 @@ mcp = FastMCP(
         "Los gates humanos (`review_*`) son decisión de una persona: úsalos solo si te lo piden."
     ),
 )
-# FastMCP 1.x no deja pasar la versión y, sin ella, el servidor se anuncia con la del SDK (`mcp`
-# 1.30.0): los clientes que la registran no distinguían una 0.1.0 de una 0.1.1 (FNV-315).
-mcp._mcp_server.version = __version__
 
 
 class LoginForm(BaseModel):
@@ -218,21 +220,63 @@ def _pronombre(que_se_pierde: str) -> str:
     return _PRONOMBRES.get(primera, "lo")
 
 
-async def _confirmar_borrado(ctx: Ctx, que_se_pierde: str) -> None:
-    """Pregunta antes de borrar, con el dato delante — no «¿seguro?», sino qué desaparece.
-
-    Si el cliente MCP **no sabe preguntar** (la elicitation es opcional en el protocolo), no se
-    queda colgado ni se niega a trabajar: sigue adelante. El gate de verdad son los permisos del
-    backend y la aprobación de la propia herramienta en el cliente; esto es la cortesía de avisar
-    a quien va a perder algo. Cancelar, en cambio, sí detiene la operación.
-    """
+def _puede_preguntar(ctx: Ctx) -> bool:
+    """¿Declaró el cliente que sabe preguntar (elicitation)? Un contexto sin petición, no."""
     try:
-        pregunta = f"{que_se_pierde} ¿{_pronombre(que_se_pierde).capitalize()} borro?"
-        result = await ctx.elicit(message=pregunta, schema=ConfirmForm)
+        caps = ctx.client_capabilities
     except Exception:
-        return  # cliente sin elicitation: no hay a quién preguntar
-    if result.action != "accept" or result.data is None or not result.data.confirmar:
+        return False
+    return caps is not None and caps.elicitation is not None
+
+
+def _sin_canal_de_vuelta(ctx: Ctx) -> bool:
+    """Desde 2026-07-28 el servidor ya no puede preguntar a mitad de una llamada: se pregunta antes
+    del cuerpo, con un resolver, y el cliente reintenta con la respuesta (Multi Round-Trip)."""
+    version = getattr(ctx, "protocol_version", None)
+    return isinstance(version, str) and version >= "2026-07-28"
+
+
+@dataclass(frozen=True)
+class _Borrado:
+    """Lo que se va a borrar, ya leído, y cómo se le cuenta a la persona antes de hacerlo."""
+
+    que_se_pierde: str
+    datos: dict[str, Any]
+
+
+def _preguntar_borrado(borrado: _Borrado, ctx: Ctx) -> Elicit[ConfirmForm] | ConfirmForm:
+    """La pregunta antes de borrar, con el dato delante: no «¿seguro?», sino qué desaparece.
+
+    Va en un resolver, antes del cuerpo de la herramienta, para que el SDK la haga por el canal que
+    toque: una petición del servidor hasta 2025-11-25, o un `input_required` que el cliente contesta
+    reintentando en 2026-07-28 (FNV-310). Si el cliente **no sabe preguntar** (la elicitation es
+    opcional), no se queda colgado ni se niega a trabajar: sigue adelante. El gate de verdad son los
+    permisos del backend y la aprobación de la herramienta en el cliente; esto es la cortesía de
+    avisar a quien va a perder algo (FNV-269). Cancelar, en cambio, sí detiene la operación.
+    """
+    if not _puede_preguntar(ctx):
+        return ConfirmForm(confirmar=True)  # no hay a quién preguntar
+    q = borrado.que_se_pierde
+    return Elicit(f"{q} ¿{_pronombre(q).capitalize()} borro?", ConfirmForm)
+
+
+def _exigir_si(confirmacion: ElicitationResult[ConfirmForm]) -> None:
+    data = getattr(confirmacion, "data", None)
+    if confirmacion.action != "accept" or data is None or not data.confirmar:
         raise FoundryError("Borrado cancelado: no se ha tocado nada.")
+
+
+async def _token_desde(form: LoginForm) -> str:
+    """Del formulario de login a un token: el pegado tal cual, o el que da email + contraseña."""
+    if form.token.strip():
+        token = form.token.strip()
+    elif form.email.strip() and form.password:
+        token = await _get_client().obtain_token(form.email.strip(), form.password)
+    else:
+        raise FoundryError("Faltan datos: email + contraseña, o un token.")
+    if form.remember:
+        _keyring_set(token)
+    return token
 
 
 async def _reauth(ctx: Ctx) -> str:
@@ -250,7 +294,14 @@ async def _reauth(ctx: Ctx) -> str:
     stored = _keyring_get()
     if stored and stored != client.token and _token_alive(stored):
         return stored
-    # Interactivo: Claude Code muestra el diálogo de login.
+    # En 2026-07-28 no se puede abrir el diálogo a mitad de una herramienta cualquiera: el que sabe
+    # preguntar por el canal nuevo es `login`, que lo hace antes de su cuerpo (FNV-310).
+    if _sin_canal_de_vuelta(ctx):
+        raise FoundryError(
+            "No hay sesión con Foundry, o ha caducado. Llama a la herramienta `login` (abre el "
+            "diálogo para entrar) y repite lo que ibas a hacer."
+        )
+    # Interactivo: el cliente muestra el diálogo de login.
     try:
         result = await ctx.elicit(
             message=f"Inicia sesión en Foundry ({cfg.api_base}): email + contraseña, o pega un token.",
@@ -263,16 +314,7 @@ async def _reauth(ctx: Ctx) -> str:
         ) from e
     if result.action != "accept" or result.data is None:
         raise FoundryError("Autenticación cancelada por el usuario.")
-    data = result.data
-    if data.token.strip():
-        token = data.token.strip()
-    elif data.email.strip() and data.password:
-        token = await client.obtain_token(data.email.strip(), data.password)
-    else:
-        raise FoundryError("Faltan datos: email + contraseña, o un token.")
-    if data.remember:
-        _keyring_set(token)
-    return token
+    return await _token_desde(result.data)
 
 
 def _prepare(ctx: Ctx, agent_model: str = "") -> FoundryClient:
@@ -330,8 +372,11 @@ def _resolve_agent_source(
 def _agent_source(ctx: Ctx) -> str:
     """Resuelve la fuente para la llamada actual sin confiar en el texto del comentario."""
 
+    # Con `initialize` (≤ 2025-11-25) sale del saludo; en 2026-07-28 no hay saludo y el SDK lo
+    # sintetiza a partir del `_meta` de cada petición (`io.modelcontextprotocol/clientInfo`). En
+    # los dos casos llega aquí, como `client_info` desde el SDK 2.x (`clientInfo` en la 1.x).
     params = getattr(ctx.session, "client_params", None)
-    info = getattr(params, "clientInfo", None)
+    info = getattr(params, "client_info", None) or getattr(params, "clientInfo", None)
     return _resolve_agent_source(
         load_config().agent_source,
         getattr(info, "name", None),
@@ -544,16 +589,39 @@ def _attachment_payload(data: bytes, content_type: str, filename: str) -> Image 
 
 
 # ── tools: sesión ────────────────────────────────────────────────────────────
+def _pedir_credenciales(ctx: Ctx) -> Elicit[LoginForm] | LoginForm:
+    """El diálogo de `login`, como resolver: el SDK lo abre por el canal del protocolo de la
+    conexión, también en 2026-07-28, donde a mitad de una herramienta ya no se puede (FNV-310).
+    Las credenciales de entorno (automatización) entran sin preguntar, como siempre."""
+    cfg = load_config()
+    if cfg.env_token:
+        return LoginForm(token=cfg.env_token)
+    if cfg.env_email and cfg.env_password:
+        return LoginForm(email=cfg.env_email, password=cfg.env_password)
+    if not _puede_preguntar(ctx):
+        raise FoundryError(
+            "Este cliente no puede pedir credenciales de forma interactiva. Define FOUNDRY_TOKEN "
+            "o FOUNDRY_EMAIL/FOUNDRY_PASSWORD como variables de entorno."
+        )
+    pregunta = f"Inicia sesión en Foundry ({cfg.api_base}): email + contraseña, o pega un token."
+    return Elicit(pregunta, LoginForm)
+
+
 @mcp.tool(annotations=ACTUALIZA)
-async def login(ctx: Ctx) -> str:
+async def login(
+    ctx: Ctx, credenciales: Annotated[ElicitationResult[LoginForm], Resolve(_pedir_credenciales)]
+) -> str:
     """Inicia sesión en Foundry (abre un diálogo para email + contraseña, o un token).
 
     Normalmente no hace falta llamarla: la primera acción sobre un tablero ya pide la sesión.
-    Útil para iniciar sesión por adelantado o cambiar de cuenta.
+    Útil para iniciar sesión por adelantado, cambiar de cuenta, o cuando otra herramienta diga que
+    no hay sesión.
     """
+    data = getattr(credenciales, "data", None)
+    if credenciales.action != "accept" or data is None:
+        raise FoundryError("Autenticación cancelada por el usuario.")
     client = _prepare(ctx)
-    client.token = None  # fuerza el diálogo de login
-    client.token = await _reauth(ctx)  # lo mismo que el `reauth` que acaba de fijar `_prepare`
+    client.token = await _token_desde(data)
     me = await client.me()
     return f"Sesión iniciada como {me.get('display_name')} <{me.get('email')}>."
 
@@ -954,18 +1022,7 @@ async def reorder_columns(
     return await _board_columns(client, initiative_id)
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        title="Borrar una columna del tablero", destructiveHint=True, idempotentHint=False
-    )
-)
-async def delete_column(
-    ctx: Ctx, initiative_id: str, column: str, reassign_to: str = ""
-) -> dict[str, Any]:
-    """Borra una columna. Si tiene tarjetas, di a dónde van con `reassign_to` (otra columna, por
-    nombre o id): se mudan con su estado y queda en su historial. El tablero no puede quedarse sin
-    columna de entrada ni de cierre.
-    """
+async def _borrado_columna(initiative_id: str, column: str, reassign_to: str, ctx: Ctx) -> _Borrado:
     client = _prepare(ctx)
     columns = await _board_columns(client, initiative_id)
     column_id = _resolve_column(columns, column)
@@ -987,14 +1044,45 @@ async def delete_column(
         mudanza = f" y {cuantas} a «{destino}»"
     else:
         mudanza = ", que está vacía"
-    await _confirmar_borrado(ctx, f'La columna «{objetivo["name"]}»{mudanza}.')
-    await client.delete_column(initiative_id, column_id, destino_id)
+    destino_nombre = next((c["name"] for c in columns if str(c["id"]) == destino_id), None)
+    return _Borrado(
+        f'La columna «{objetivo["name"]}»{mudanza}.',
+        {"column_id": column_id, "name": objetivo["name"], "dentro": dentro,
+         "destino_id": destino_id, "destino": destino_nombre},
+    )  # fmt: skip
+
+
+async def _confirma_columna(
+    borrado: Annotated[_Borrado, Resolve(_borrado_columna)], ctx: Ctx
+) -> Elicit[ConfirmForm] | ConfirmForm:
+    return _preguntar_borrado(borrado, ctx)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Borrar una columna del tablero", destructive_hint=True, idempotent_hint=False
+    )
+)
+async def delete_column(
+    ctx: Ctx,
+    initiative_id: str,
+    column: str,
+    borrado: Annotated[_Borrado, Resolve(_borrado_columna)],
+    confirmacion: Annotated[ElicitationResult[ConfirmForm], Resolve(_confirma_columna)],
+    reassign_to: str = "",
+) -> dict[str, Any]:
+    """Borra una columna. Si tiene tarjetas, di a dónde van con `reassign_to` (otra columna, por
+    nombre o id): se mudan con su estado y queda en su historial. El tablero no puede quedarse sin
+    columna de entrada ni de cierre.
+    """
+    _exigir_si(confirmacion)
+    client = _prepare(ctx)
+    d = borrado.datos
+    await client.delete_column(initiative_id, d["column_id"], d["destino_id"])
     return {
-        "deleted": objetivo["name"],
-        "moved_tasks": dentro,
-        "moved_to": next(
-            (c["name"] for c in columns if str(c["id"]) == destino_id), None
-        ),
+        "deleted": d["name"],
+        "moved_tasks": d["dentro"],
+        "moved_to": d["destino"],
         "columns": await _board_columns(client, initiative_id),
     }
 
@@ -1115,20 +1203,40 @@ async def edit_task(
     return await client.edit_task(initiative_id, task_id, body)
 
 
-@mcp.tool(annotations=BORRA)
-async def delete_task(ctx: Ctx, initiative_id: str, task_id: str) -> dict[str, Any]:
-    """Borra una tarjeta (irreversible). Antes pregunta, diciendo qué se va con ella (historial,
-    adjuntos, criterios); si el cliente no sabe preguntar, sigue y lo dice en la respuesta.
-    """
+async def _borrado_tarjeta(initiative_id: str, task_id: str, ctx: Ctx) -> _Borrado:
     client = _prepare(ctx)
     detail = await client.get_initiative(initiative_id)
     task = _find_task(detail, task_id)
     if task is None:
         raise FoundryError(f"La tarjeta {task_id} no está en este tablero.")
-    perdido = await _lo_que_se_pierde(client, initiative_id, task)
-    await _confirmar_borrado(ctx, perdido)
-    await client.delete_task(initiative_id, task_id)
-    return {"status": "deleted", "task_id": task_id, "era": task.get("title"), "perdido": perdido}
+    return _Borrado(await _lo_que_se_pierde(client, initiative_id, task), task)
+
+
+async def _confirma_tarjeta(
+    borrado: Annotated[_Borrado, Resolve(_borrado_tarjeta)], ctx: Ctx
+) -> Elicit[ConfirmForm] | ConfirmForm:
+    return _preguntar_borrado(borrado, ctx)
+
+
+@mcp.tool(annotations=BORRA)
+async def delete_task(
+    ctx: Ctx,
+    initiative_id: str,
+    task_id: str,
+    borrado: Annotated[_Borrado, Resolve(_borrado_tarjeta)],
+    confirmacion: Annotated[ElicitationResult[ConfirmForm], Resolve(_confirma_tarjeta)],
+) -> dict[str, Any]:
+    """Borra una tarjeta (irreversible). Antes pregunta, diciendo qué se va con ella (historial,
+    adjuntos, criterios); si el cliente no sabe preguntar, sigue y lo dice en la respuesta.
+    """
+    _exigir_si(confirmacion)
+    await _prepare(ctx).delete_task(initiative_id, task_id)
+    return {
+        "status": "deleted",
+        "task_id": task_id,
+        "era": borrado.datos.get("title"),
+        "perdido": borrado.que_se_pierde,
+    }
 
 
 @mcp.tool(annotations=CREA)
@@ -1840,32 +1948,47 @@ async def upload_task_attachment(
     )
 
 
-@mcp.tool(annotations=BORRA)
-async def delete_task_attachment(
-    ctx: Ctx, initiative_id: str, task_id: str, attachment_id: str
-) -> dict[str, Any]:
-    """Borra un adjunto de una tarjeta (irreversible; el id sale de
-    `list_task_attachments`). Dice qué se borró y queda en el historial.
-    """
-    client = _prepare(ctx)
-    antes = await client.list_task_attachments(initiative_id, task_id)
-    borrado = next((a for a in antes if str(a.get("id")) == attachment_id), None)
-    if borrado is None:
+async def _borrado_adjunto(initiative_id: str, task_id: str, attachment_id: str, ctx: Ctx) -> _Borrado:
+    antes = await _prepare(ctx).list_task_attachments(initiative_id, task_id)
+    adjunto = next((a for a in antes if str(a.get("id")) == attachment_id), None)
+    if adjunto is None:
         raise FoundryError(
             f"El adjunto {attachment_id} no está en esta tarjeta. "
             f"Tiene {len(antes)}: míralos con `list_task_attachments`."
         )
-    peso = _tamano_legible(int(borrado.get("size") or 0))
-    await _confirmar_borrado(
-        ctx, f'El adjunto «{borrado.get("filename")}» ({peso}) de esta tarjeta.'
+    peso = _tamano_legible(int(adjunto.get("size") or 0))
+    return _Borrado(
+        f'El adjunto «{adjunto.get("filename")}» ({peso}) de esta tarjeta.',
+        {**adjunto, "remaining": len(antes) - 1},
     )
-    await client.delete_task_attachment(initiative_id, task_id, attachment_id)
+
+
+async def _confirma_adjunto(
+    borrado: Annotated[_Borrado, Resolve(_borrado_adjunto)], ctx: Ctx
+) -> Elicit[ConfirmForm] | ConfirmForm:
+    return _preguntar_borrado(borrado, ctx)
+
+
+@mcp.tool(annotations=BORRA)
+async def delete_task_attachment(
+    ctx: Ctx,
+    initiative_id: str,
+    task_id: str,
+    attachment_id: str,
+    borrado: Annotated[_Borrado, Resolve(_borrado_adjunto)],
+    confirmacion: Annotated[ElicitationResult[ConfirmForm], Resolve(_confirma_adjunto)],
+) -> dict[str, Any]:
+    """Borra un adjunto de una tarjeta (irreversible; el id sale de
+    `list_task_attachments`). Dice qué se borró y queda en el historial.
+    """
+    _exigir_si(confirmacion)
+    await _prepare(ctx).delete_task_attachment(initiative_id, task_id, attachment_id)
     return {
         "deleted": True,
         "id": attachment_id,
-        "filename": borrado.get("filename"),
-        "size": borrado.get("size"),
-        "remaining": len(antes) - 1,
+        "filename": borrado.datos.get("filename"),
+        "size": borrado.datos.get("size"),
+        "remaining": borrado.datos["remaining"],
     }
 
 
@@ -2053,11 +2176,7 @@ async def rename_note(
     return await _prepare(ctx).update_document(document_id, body)
 
 
-@mcp.tool(annotations=BORRA)
-async def delete_note(ctx: Ctx, document_id: str) -> str:
-    """Borra una nota (sus hijas quedan huérfanas: muévelas antes si importan). Antes pregunta,
-    diciendo cuál es y cuántas notas la enlazan; si el cliente no sabe preguntar, sigue.
-    """
+async def _borrado_nota(document_id: str, ctx: Ctx) -> _Borrado:
     client = _prepare(ctx)
     try:
         # El detalle viene envuelto (`{document, blocks}`): leer el título del envoltorio daba
@@ -2073,9 +2192,28 @@ async def delete_note(ctx: Ctx, document_id: str) -> str:
     cuantos = (
         f", enlazada desde {enlaces} {'nota' if enlaces == 1 else 'notas'}" if enlaces else ""
     )
-    await _confirmar_borrado(ctx, f"La nota «{titulo}»{cuantos}.")
-    await client.delete_document(document_id)
-    return f"Nota «{titulo}» borrada."
+    return _Borrado(f"La nota «{titulo}»{cuantos}.", {"title": titulo})
+
+
+async def _confirma_nota(
+    borrado: Annotated[_Borrado, Resolve(_borrado_nota)], ctx: Ctx
+) -> Elicit[ConfirmForm] | ConfirmForm:
+    return _preguntar_borrado(borrado, ctx)
+
+
+@mcp.tool(annotations=BORRA)
+async def delete_note(
+    ctx: Ctx,
+    document_id: str,
+    borrado: Annotated[_Borrado, Resolve(_borrado_nota)],
+    confirmacion: Annotated[ElicitationResult[ConfirmForm], Resolve(_confirma_nota)],
+) -> str:
+    """Borra una nota (sus hijas quedan huérfanas: muévelas antes si importan). Antes pregunta,
+    diciendo cuál es y cuántas notas la enlazan; si el cliente no sabe preguntar, sigue.
+    """
+    _exigir_si(confirmacion)
+    await _prepare(ctx).delete_document(document_id)
+    return f"Nota «{borrado.datos['title']}» borrada."
 
 
 @mcp.tool(annotations=CREA)
@@ -2375,7 +2513,7 @@ def _strip_schema_titles(node: Any) -> None:
                 _strip_schema_titles(sub)
 
 
-def _finish_tools(server: FastMCP, toolsets: tuple[str, ...]) -> None:
+def _finish_tools(server: MCPServer, toolsets: tuple[str, ...]) -> None:
     keep = _selected_tools(toolsets)
     for tool in list(server._tool_manager.list_tools()):
         if tool.name not in keep:

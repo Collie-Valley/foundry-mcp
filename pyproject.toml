@@ -28,12 +28,12 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    # SDK oficial de Model Context Protocol (incluye FastMCP + elicitation). El techo en la 2.0 no
-    # es precaución: esa versión quitó `mcp.server.fastmcp`, de donde salen FastMCP, Context e
-    # Image, y el servidor ni siquiera llega a importarse. El `uv.lock` salva a quien trabaja en
-    # el repo, pero no viaja dentro del paquete: sin este techo, quien lo instale desde PyPI
-    # resuelve la 2.x y se encuentra un MCP que no arranca.
-    "mcp>=1.12,<2",
+    # SDK oficial de Model Context Protocol. La 2.x es la que habla la revisión 2026-07-28 (sin
+    # `initialize`, sin sesión) y sigue sirviendo a los clientes de revisiones anteriores; la 1.x
+    # solo recibe mantenimiento (FNV-310). El techo en la 3.0 no es precaución: la 2.0 ya rompió
+    # el import del servidor (`mcp.server.fastmcp` desapareció), y el `uv.lock` no viaja dentro
+    # del paquete, así que sin techo quien lo instale desde PyPI resolvería la próxima mayor.
+    "mcp>=2.3,<3",
     "httpx>=0.27",       # cliente HTTP async contra la API de Foundry
     "python-dotenv>=1.0", # carga del .env local (solo config, no credenciales)
     "keyring>=25",       # guarda el token en el gestor de credenciales del SO (opt-in)

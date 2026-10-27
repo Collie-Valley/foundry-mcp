@@ -20,7 +20,7 @@ from foundry_mcp.foundry import FoundryClient, set_agent_identity
 def _ctx(client_name: str) -> Any:
     """Lo mínimo de un `Context` que mira el servidor: el `clientInfo` de la sesión."""
     info = SimpleNamespace(name=client_name, title=None)
-    return SimpleNamespace(session=SimpleNamespace(client_params=SimpleNamespace(clientInfo=info)))
+    return SimpleNamespace(session=SimpleNamespace(client_params=SimpleNamespace(client_info=info)))
 
 
 class DeclaredModelEndToEndTests(IsolatedAsyncioTestCase):

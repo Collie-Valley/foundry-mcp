@@ -14,10 +14,16 @@ from contextvars import ContextVar
 from typing import Any, cast
 
 import httpx
+from mcp.server.mcpserver.exceptions import ToolError
 
 
-class FoundryError(RuntimeError):
-    """Error legible de la API (status + detalle). Se devuelve como error de la herramienta MCP."""
+class FoundryError(ToolError):
+    """Error legible de la API (status + detalle). Se devuelve como error de la herramienta MCP.
+
+    Hereda de `ToolError` a propósito: desde el SDK 2.x, cualquier otra excepción le llega al
+    modelo solo como «Error executing tool …», sin el motivo (FNV-310). Y el motivo es justo lo que
+    le deja corregirse: qué columnas hay, qué campo rechazó la API, por qué falta la sesión.
+    """
 
 
 # Callback que devuelve un token FRESCO (interactivo o desde overrides de entorno).
@@ -49,9 +55,7 @@ class FoundryClient:
     # ── autenticación ────────────────────────────────────────────────────────
     async def obtain_token(self, email: str, password: str) -> str:
         """POST /auth/login → access_token. No fija estado (lo usa el flujo de reauth del servidor)."""
-        r = await self._c.post(
-            f"{self._base}/auth/login", json={"email": email, "password": password}
-        )
+        r = await self._send("POST", "/auth/login", {}, json={"email": email, "password": password})
         if r.status_code == 401:
             raise FoundryError("Login rechazado (401): email o contraseña incorrectos.")
         if r.status_code >= 400:
@@ -74,14 +78,25 @@ class FoundryClient:
             headers["X-Foundry-Agent-Source"] = source
         if model:
             headers["X-Foundry-Agent-Model"] = model
-        r = await self._c.request(method, f"{self._base}{path}", headers=headers, **kw)
+        r = await self._send(method, path, headers, **kw)
         if r.status_code == 401 and self.reauth is not None:  # token expirado/ inválido
             self.token = await self.reauth()  # reautentica (interactivo si hace falta) y reintenta
             headers["Authorization"] = f"Bearer {self.token}"
-            r = await self._c.request(method, f"{self._base}{path}", headers=headers, **kw)
+            r = await self._send(method, path, headers, **kw)
         if r.status_code >= 400:
             raise FoundryError(_error_message(r))
         return r
+
+    async def _send(self, method: str, path: str, headers: dict[str, str], **kw: Any) -> httpx.Response:
+        """La petición en sí. Un fallo de red (sin conexión, timeout, DNS) se cuenta como lo que es:
+        con el SDK 2.x, la excepción de httpx tal cual le llegaría al modelo como «Error executing
+        tool», sin decir que Foundry no respondía."""
+        try:
+            return await self._c.request(method, f"{self._base}{path}", headers=headers, **kw)
+        except httpx.TimeoutException as e:
+            raise FoundryError(f"Foundry no respondió a tiempo ({self._base}): {e!r}.") from e
+        except httpx.HTTPError as e:
+            raise FoundryError(f"No se pudo hablar con Foundry ({self._base}): {e!r}.") from e
 
     async def _json(self, method: str, path: str, **kw: Any) -> Any:
         r = await self._req(method, path, **kw)

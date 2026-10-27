@@ -143,6 +143,12 @@ token.
 El diálogo usa *elicitation* de MCP. Si tu cliente no la soporta, usa `FOUNDRY_TOKEN` o
 `FOUNDRY_EMAIL` + `FOUNDRY_PASSWORD` (ver [Configuración](#configuración)).
 
+**Protocolo.** El servidor habla la revisión **2026-07-28** de MCP (sin `initialize` ni sesión de
+protocolo) y también las anteriores, con las que conectan hoy Claude Code, Codex y OpenCode. En
+2026-07-28 el servidor ya no puede abrir un diálogo a mitad de una herramienta cualquiera: si una
+dice que no hay sesión, llama a **`login`**, que sí abre el diálogo, y repite. Las preguntas antes
+de borrar funcionan igual en las dos revisiones.
+
 ## Herramientas
 
 74 herramientas y 3 prompts. Cada una declara si **solo lee** (23), si **crea o actualiza** (45) o

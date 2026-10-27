@@ -10,7 +10,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from foundry_mcp import server
 from foundry_mcp.config import load_config
@@ -42,14 +42,14 @@ class RegistryTests(IsolatedAsyncioTestCase):
     async def test_no_generic_output_schema_and_no_argument_titles(self) -> None:
         for t in self.tools:
             with self.subTest(tool=t.name):
-                self.assertIsNone(t.outputSchema)
-                self.assertNotIn("title", t.inputSchema)
-                for prop in t.inputSchema.get("properties", {}).values():
+                self.assertIsNone(t.output_schema)
+                self.assertNotIn("title", t.input_schema)
+                for prop in t.input_schema.get("properties", {}).values():
                     self.assertNotIn("title", prop)
 
     async def test_size_stays_under_budget(self) -> None:
         size = sum(
-            len(t.description or "") + len(json.dumps(t.inputSchema, ensure_ascii=False)) for t in self.tools
+            len(t.description or "") + len(json.dumps(t.input_schema, ensure_ascii=False)) for t in self.tools
         )
         self.assertLess(size, MAX_DESCRIPTIONS_AND_SCHEMAS)
 
@@ -72,7 +72,8 @@ class RegistryTests(IsolatedAsyncioTestCase):
     async def test_calls_return_plain_content_once(self) -> None:
         """Sin outputSchema, el resultado viaja una vez (texto), no también como structuredContent."""
         result = await server.mcp.call_tool("logout", {})
-        self.assertIsInstance(result, list)
+        self.assertIsNone(result.structured_content)
+        self.assertEqual(result.content[0].text, "Sesión cerrada: token olvidado.")
 
 
 class SelectedToolsTests(TestCase):
@@ -103,7 +104,7 @@ class SelectedToolsTests(TestCase):
 
 class FinishToolsTests(IsolatedAsyncioTestCase):
     async def test_it_prunes_titles_and_strips_on_a_fresh_server(self) -> None:
-        fresh = FastMCP("prueba")
+        fresh = MCPServer("prueba")
 
         async def whoami() -> dict[str, Any]:
             return {}
@@ -120,5 +121,5 @@ class FinishToolsTests(IsolatedAsyncioTestCase):
         tools = {t.name: t for t in await fresh.list_tools()}
         self.assertEqual(set(tools), {"whoami", "list_notes"})
         self.assertEqual(tools["list_notes"].title, "Listar notas")
-        self.assertIsNone(tools["list_notes"].outputSchema)
-        self.assertNotIn("title", tools["list_notes"].inputSchema["properties"]["space_id"])
+        self.assertIsNone(tools["list_notes"].output_schema)
+        self.assertNotIn("title", tools["list_notes"].input_schema["properties"]["space_id"])

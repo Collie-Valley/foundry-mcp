@@ -19,7 +19,7 @@ class ContextInjectionTests(IsolatedAsyncioTestCase):
     async def test_no_tool_exposes_ctx_as_an_argument(self) -> None:
         for t in await server.mcp.list_tools():
             with self.subTest(tool=t.name):
-                self.assertNotIn("ctx", t.inputSchema.get("properties", {}))
+                self.assertNotIn("ctx", t.input_schema.get("properties", {}))
 
 
 class ContextIsInjectedTests(TestCase):
