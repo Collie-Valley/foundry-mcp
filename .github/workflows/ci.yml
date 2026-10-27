@@ -19,6 +19,18 @@ jobs:
           python-version: "3.13"
       - run: uvx ruff check .
 
+  # Tipos en modo estricto, con la configuración de pyproject.toml. Necesita las dependencias
+  # instaladas (mypy tiene que ver los tipos de mcp y httpx), por eso hace `uv sync` y el lint no.
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - run: uv run mypy
+
   # El paquete promete `requires-python = ">=3.10"`: se prueba en el suelo y en el techo, porque
   # quien lo instala no usa la versión de Python que usamos aquí.
   test:

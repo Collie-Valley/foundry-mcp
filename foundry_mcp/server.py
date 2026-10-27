@@ -26,11 +26,17 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP, Image
+from mcp.server.session import ServerSession
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from foundry_mcp.config import load_config
 from foundry_mcp.foundry import FoundryClient, FoundryError, set_agent_identity
+
+# El contexto de cada llamada, con los parámetros que pide mypy estricto: la sesión del servidor y
+# un lifespan que no usamos. FastMCP lo inyecta reconociendo esta anotación, así que cambiarla puede
+# convertir `ctx` en un argumento de todas las herramientas: lo vigila tests/test_context_injection.py.
+Ctx = Context[ServerSession, None]
 
 # Prioridad de 5 niveles (ADR-0014, E3·B). Se aceptan también los 3 antiguos (baja/media/alta): el
 # backend los normaliza a low/medium/high.
@@ -204,7 +210,7 @@ def _pronombre(que_se_pierde: str) -> str:
     return _PRONOMBRES.get(primera, "lo")
 
 
-async def _confirmar_borrado(ctx: Context, que_se_pierde: str) -> None:
+async def _confirmar_borrado(ctx: Ctx, que_se_pierde: str) -> None:
     """Pregunta antes de borrar, con el dato delante — no «¿seguro?», sino qué desaparece.
 
     Si el cliente MCP **no sabe preguntar** (la elicitation es opcional en el protocolo), no se
@@ -221,7 +227,7 @@ async def _confirmar_borrado(ctx: Context, que_se_pierde: str) -> None:
         raise FoundryError("Borrado cancelado: no se ha tocado nada.")
 
 
-async def _reauth(ctx: Context) -> str:
+async def _reauth(ctx: Ctx) -> str:
     """Devuelve un token FRESCO: overrides de entorno → keyring (si otro proceso ya renovó) →
     si no queda otra, elicitation (el diálogo de login)."""
     cfg = load_config()
@@ -261,7 +267,7 @@ async def _reauth(ctx: Context) -> str:
     return token
 
 
-def _prepare(ctx: Context, agent_model: str = "") -> FoundryClient:
+def _prepare(ctx: Ctx, agent_model: str = "") -> FoundryClient:
     """Deja el cliente listo: fija `reauth` con el ctx actual y siembra el token del keyring."""
     client = _get_client()
     client.reauth = lambda: _reauth(ctx)
@@ -313,7 +319,7 @@ def _resolve_agent_source(
     return "other"
 
 
-def _agent_source(ctx: Context) -> str:
+def _agent_source(ctx: Ctx) -> str:
     """Resuelve la fuente para la llamada actual sin confiar en el texto del comentario."""
 
     params = getattr(ctx.session, "client_params", None)
@@ -337,7 +343,7 @@ def _resolve_agent_model(explicit: str = "") -> str | None:
 
 
 async def _add_agent_comment(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     content: str,
@@ -360,7 +366,8 @@ async def _add_agent_comment(
 
 
 def _columns_of(detail: dict[str, Any]) -> list[dict[str, Any]]:
-    return detail.get("board", {}).get("columns", [])
+    columns: list[dict[str, Any]] = detail.get("board", {}).get("columns", [])
+    return columns
 
 
 def _resolve_column(columns: list[dict[str, Any]], column: str) -> str:
@@ -423,7 +430,8 @@ def _validate(value: str, allowed: tuple[str, ...], label: str) -> str:
 
 def _find_task(detail: dict[str, Any], task_id: str) -> dict[str, Any] | None:
     for col in _columns_of(detail):
-        for t in col.get("tasks", []):
+        tasks: list[dict[str, Any]] = col.get("tasks", [])
+        for t in tasks:
             if str(t["id"]) == task_id:
                 return t
     return None
@@ -518,7 +526,7 @@ def _attachment_payload(data: bytes, content_type: str, filename: str) -> Image 
 
 # ── tools: sesión ────────────────────────────────────────────────────────────
 @mcp.tool(annotations=ACTUALIZA)
-async def login(ctx: Context) -> str:
+async def login(ctx: Ctx) -> str:
     """Inicia sesión en Foundry (abre un diálogo para email + contraseña, o un token).
 
     Normalmente no hace falta llamarla: la primera acción sobre un tablero ya pide la sesión.
@@ -526,7 +534,7 @@ async def login(ctx: Context) -> str:
     """
     client = _prepare(ctx)
     client.token = None  # fuerza el diálogo de login
-    client.token = await client.reauth()
+    client.token = await _reauth(ctx)  # lo mismo que el `reauth` que acaba de fijar `_prepare`
     me = await client.me()
     return f"Sesión iniciada como {me.get('display_name')} <{me.get('email')}>."
 
@@ -541,19 +549,19 @@ async def logout() -> str:
 
 # ── tools: lectura ───────────────────────────────────────────────────────────
 @mcp.tool(annotations=SOLO_LEE)
-async def whoami(ctx: Context) -> dict[str, Any]:
+async def whoami(ctx: Ctx) -> dict[str, Any]:
     """Cuenta con la que actúa el MCP (id, email, nombre). Verifica la sesión/credenciales."""
     return await _prepare(ctx).me()
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def list_spaces(ctx: Context) -> list[dict[str, Any]]:
+async def list_spaces(ctx: Ctx) -> list[dict[str, Any]]:
     """Lista las Áreas de trabajo (espacios) visibles: id, name, owner_id, is_personal."""
     return await _prepare(ctx).list_spaces()
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def list_boards(ctx: Context, space_id: str | None = None) -> list[dict[str, Any]]:
+async def list_boards(ctx: Ctx, space_id: str | None = None) -> list[dict[str, Any]]:
     """Lista tableros/iniciativas (id, title, space_id, maturity).
 
     - sin `space_id`: los tableros **personales** de la cuenta (creados sin Área).
@@ -568,7 +576,7 @@ async def list_boards(ctx: Context, space_id: str | None = None) -> list[dict[st
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def list_all_boards(ctx: Context) -> dict[str, Any]:
+async def list_all_boards(ctx: Ctx) -> dict[str, Any]:
     """Panorama completo: tableros personales + los de cada Área a la que pertenece la cuenta.
 
     Devuelve {"personal": [...], "spaces": [{"space": {...}, "boards": [...]}, ...]}.
@@ -584,7 +592,7 @@ async def list_all_boards(ctx: Context) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def get_board(ctx: Context, initiative_id: str) -> dict[str, Any]:
+async def get_board(ctx: Ctx, initiative_id: str) -> dict[str, Any]:
     """Trae un tablero completo: la ficha de la iniciativa + columnas, cada una con sus tarjetas.
 
     Cada columna: id, name, order, `category` y `color`. **La categoría es lo que hay que mirar**
@@ -602,7 +610,7 @@ async def get_board(ctx: Context, initiative_id: str) -> dict[str, Any]:
 
 # ── tools: tableros ──────────────────────────────────────────────────────────
 @mcp.tool(annotations=SOLO_LEE)
-async def list_board_presets(ctx: Context) -> list[dict[str, Any]]:
+async def list_board_presets(ctx: Ctx) -> list[dict[str, Any]]:
     """Las **plantillas de columnas** entre las que se elige al crear un tablero (FNV-257).
 
     Cada una trae `key` (lo que se pasa a `create_board`), `label`, `template` (`kanban` o `scrum`;
@@ -615,7 +623,7 @@ async def list_board_presets(ctx: Context) -> list[dict[str, Any]]:
 
 @mcp.tool(annotations=CREA)
 async def create_board(
-    ctx: Context,
+    ctx: Ctx,
     title: str,
     space_id: str | None = None,
     preset: str = "",
@@ -645,7 +653,7 @@ async def create_board(
 
 
 @mcp.tool(annotations=ACTUALIZA)
-async def move_board_to_space(ctx: Context, initiative_id: str, space_id: str) -> dict[str, Any]:
+async def move_board_to_space(ctx: Ctx, initiative_id: str, space_id: str) -> dict[str, Any]:
     """Mueve un tablero **personal** a un Área de trabajo para compartirlo con el equipo."""
     return await _prepare(ctx).move_board(initiative_id, space_id)
 
@@ -697,7 +705,7 @@ async def _lo_que_se_pierde(
 
 @mcp.tool(annotations=CREA)
 async def add_column(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     name: str,
     category: str = "in_progress",
@@ -718,7 +726,7 @@ async def add_column(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def rename_column(
-    ctx: Context, initiative_id: str, column: str, name: str
+    ctx: Ctx, initiative_id: str, column: str, name: str
 ) -> list[dict[str, Any]]:
     """Renombra una columna (por nombre actual o por id) y devuelve cómo quedan todas.
 
@@ -733,7 +741,7 @@ async def rename_column(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def set_column_category(
-    ctx: Context, initiative_id: str, column: str, category: str
+    ctx: Ctx, initiative_id: str, column: str, category: str
 ) -> list[dict[str, Any]]:
     """Cambia el TIPO de una columna: `todo` · `in_progress` · `done`.
 
@@ -753,7 +761,7 @@ async def set_column_category(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def set_column_color(
-    ctx: Context, initiative_id: str, column: str, color: str = ""
+    ctx: Ctx, initiative_id: str, column: str, color: str = ""
 ) -> list[dict[str, Any]]:
     """Pinta una columna de un color propio (`#rrggbb`), o se lo quita con `color` vacío.
 
@@ -768,7 +776,7 @@ async def set_column_color(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def reorder_columns(
-    ctx: Context, initiative_id: str, columns: list[str]
+    ctx: Ctx, initiative_id: str, columns: list[str]
 ) -> list[dict[str, Any]]:
     """Reordena las columnas del tablero: pasa **todas**, por nombre o por id, en el orden que quedan.
 
@@ -794,7 +802,7 @@ async def reorder_columns(
     )
 )
 async def delete_column(
-    ctx: Context, initiative_id: str, column: str, reassign_to: str = ""
+    ctx: Ctx, initiative_id: str, column: str, reassign_to: str = ""
 ) -> dict[str, Any]:
     """Borra una columna del tablero. **Si tiene tarjetas, hay que decir a dónde van** con
     `reassign_to` (otra columna, por nombre o id): se mudan con el estado de la columna destino y
@@ -840,7 +848,7 @@ async def delete_column(
 # ── tools: tarjetas ──────────────────────────────────────────────────────────
 @mcp.tool(annotations=CREA)
 async def create_task(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     title: str,
     column: str = "",
@@ -902,7 +910,7 @@ async def create_task(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def move_task(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     column: str,
@@ -921,7 +929,7 @@ async def move_task(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def edit_task(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     title: str | None = None,
@@ -963,7 +971,7 @@ async def edit_task(
 
 
 @mcp.tool(annotations=BORRA)
-async def delete_task(ctx: Context, initiative_id: str, task_id: str) -> dict[str, Any]:
+async def delete_task(ctx: Ctx, initiative_id: str, task_id: str) -> dict[str, Any]:
     """Elimina una tarjeta del tablero (irreversible). Requiere rol colaborador/dueño.
 
     Antes de borrar mira **qué se va con ella** —su historial, sus adjuntos y sus criterios— y lo
@@ -983,7 +991,7 @@ async def delete_task(ctx: Context, initiative_id: str, task_id: str) -> dict[st
 
 @mcp.tool(annotations=CREA)
 async def create_tasks_from_seeds(
-    ctx: Context, initiative_id: str, seed_ids: list[str], agent_model: str = ""
+    ctx: Ctx, initiative_id: str, seed_ids: list[str], agent_model: str = ""
 ) -> list[dict[str, Any]]:
     """Vivero→Tablero: manda semillas (ideas) del Vivero como tarjetas **propuestas** a la columna
     de entrada del tablero, se llame como se llame.
@@ -997,7 +1005,7 @@ async def create_tasks_from_seeds(
 # ── tools: comentarios / historial ────────────────────────────────────────────
 @mcp.tool(annotations=CREA)
 async def add_task_comment(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     content: str,
@@ -1018,7 +1026,7 @@ async def add_task_comment(
 
 @mcp.tool(annotations=CREA)
 async def add_task_entry(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     content: str,
@@ -1066,7 +1074,7 @@ async def _repo_meta(
 
 @mcp.tool(annotations=CREA)
 async def report_progress(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     content: str,
@@ -1109,7 +1117,7 @@ async def report_progress(
 
 @mcp.tool(annotations=CREA)
 async def flag_blocker(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     reason: str,
@@ -1140,7 +1148,7 @@ async def flag_blocker(
 
 @mcp.tool(annotations=CREA)
 async def report_verification(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     status: str,
@@ -1174,7 +1182,7 @@ async def report_verification(
 
 @mcp.tool(annotations=CREA)
 async def propose_criterion(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     text: str,
@@ -1192,7 +1200,7 @@ async def propose_criterion(
 
 @mcp.tool(annotations=CREA)
 async def record_decision(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     title: str,
@@ -1224,7 +1232,7 @@ async def record_decision(
 
 @mcp.tool(annotations=SOLO_LEE)
 async def list_criteria(
-    ctx: Context, initiative_id: str, task_id: str
+    ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
     """Lee los **criterios de aceptación** de una tarjeta con el estado de su gate (ADR-0017 F2):
     `status` = `proposed` (propuesto por la IA, espera decisión humana) · `accepted` (oficial) ·
@@ -1239,7 +1247,7 @@ async def list_criteria(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def review_criterion(
-    ctx: Context, initiative_id: str, task_id: str, criterion_id: str, accept: bool
+    ctx: Ctx, initiative_id: str, task_id: str, criterion_id: str, accept: bool
 ) -> dict[str, Any]:
     """**Gate humano** de un criterio de aceptación (ADR-0017 F2): `accept=True` lo vuelve oficial;
     `accept=False` lo descarta. El `criterion_id` sale de `list_criteria`.
@@ -1255,7 +1263,7 @@ async def review_criterion(
 
 @mcp.tool(annotations=SOLO_LEE)
 async def list_decisions(
-    ctx: Context, initiative_id: str, task_id: str
+    ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
     """Lee las **decisiones de diseño** de una tarjeta con el estado de su gate (ADR-0017 F2):
     `status` = `proposed` · `accepted` · `rejected`; más `source` (humano|ia|colaborativo) y el
@@ -1269,7 +1277,7 @@ async def list_decisions(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def review_decision(
-    ctx: Context, initiative_id: str, task_id: str, decision_id: str, accept: bool
+    ctx: Ctx, initiative_id: str, task_id: str, decision_id: str, accept: bool
 ) -> dict[str, Any]:
     """**Gate humano** de una decisión de diseño (ADR-0017 F2): `accept=True` la vuelve oficial;
     `accept=False` la descarta. El `decision_id` sale de `list_decisions`.
@@ -1284,7 +1292,7 @@ async def review_decision(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def review_task_proposal(
-    ctx: Context, initiative_id: str, task_id: str, accept: bool
+    ctx: Ctx, initiative_id: str, task_id: str, accept: bool
 ) -> dict[str, Any]:
     """**Gate humano** de una **tarjeta** propuesta por la IA (`status_agent="proposed"`, ADR-0017
     F2): `accept=True` la vuelve una tarjeta oficial del tablero; `accept=False` la marca `rejected`
@@ -1299,7 +1307,7 @@ async def review_task_proposal(
 
 @mcp.tool(annotations=CREA)
 async def add_test_case(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     title: str,
@@ -1324,7 +1332,7 @@ async def add_test_case(
 
 @mcp.tool(annotations=SOLO_LEE)
 async def list_test_cases(
-    ctx: Context, initiative_id: str, task_id: str
+    ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
     """Lee los **casos de prueba** de una tarjeta (FNV-127) con su estado (`pending` sin validar ·
     `passed` · `failed`), sus pasos, el resultado esperado y la procedencia. No muta nada.
@@ -1337,7 +1345,7 @@ async def list_test_cases(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def mark_test_case(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     test_case_id: str,
@@ -1359,7 +1367,7 @@ async def mark_test_case(
 
 @mcp.tool(annotations=SOLO_LEE)
 async def list_test_executions(
-    ctx: Context, initiative_id: str, task_id: str, test_case_id: str = ""
+    ctx: Ctx, initiative_id: str, task_id: str, test_case_id: str = ""
 ) -> list[dict[str, Any]]:
     """Lee la **bitácora de ejecuciones** de los casos de prueba (FNV-159): cada marca deja una
     corrida —resultado (`passed`/`failed`/`pending`), quién (humano o agente + modelo), en qué etapa
@@ -1374,7 +1382,7 @@ async def list_test_executions(
 
 @mcp.tool(annotations=SOLO_LEE)
 async def get_task_comments(
-    ctx: Context, initiative_id: str, task_id: str
+    ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
     """Lista el historial/comentarios de una tarjeta (autor, tipo human|agent, texto y fecha)."""
     return await _prepare(ctx).list_task_comments(initiative_id, task_id)
@@ -1382,7 +1390,7 @@ async def get_task_comments(
 
 @mcp.tool(annotations=SOLO_LEE)
 async def get_task_history(
-    ctx: Context, initiative_id: str, task_id: str
+    ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
     """Historial **estructurado** de una tarjeta (ADR-0014, E4): qué campo cambió, de qué valor a
     qué valor, quién y cuándo (orden cronológico).
@@ -1397,7 +1405,7 @@ async def get_task_history(
 # ── tools: workflow (transición de estado) ─────────────────────────────────────
 @mcp.tool(annotations=ACTUALIZA)
 async def transition_task(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     status: str,
@@ -1421,7 +1429,7 @@ async def transition_task(
 # ── tools: jerarquía / campos ricos ────────────────────────────────────────────
 @mcp.tool(annotations=ACTUALIZA)
 async def set_task_hierarchy(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     issue_type: str,
@@ -1444,7 +1452,7 @@ async def set_task_hierarchy(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def set_task_details(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     story_points: float | None = None,
@@ -1476,7 +1484,7 @@ async def set_task_details(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def set_task_labels(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     labels: list[str],
@@ -1501,7 +1509,7 @@ async def set_task_labels(
 # ── tools: épicas ──────────────────────────────────────────────────────────────
 @mcp.tool(annotations=CREA)
 async def create_epic(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     title: str,
     column: str = "",
@@ -1513,7 +1521,8 @@ async def create_epic(
     `create_task` con `issue_type=epic`. Cuelga hijas de ella con `parent_id` al crearlas; a su vez,
     una historia puede agrupar tareas, bugs, incidencias y subtareas.
     """
-    return await create_task(
+    # `create_task` pasó por el decorador de FastMCP, que la devuelve sin tipo: se lo pone esta línea.
+    epic: dict[str, Any] = await create_task(
         ctx,
         initiative_id,
         title,
@@ -1523,10 +1532,11 @@ async def create_epic(
         issue_type="epic",
         agent_model=agent_model,
     )
+    return epic
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def list_epics(ctx: Context, initiative_id: str) -> list[dict[str, Any]]:
+async def list_epics(ctx: Ctx, initiative_id: str) -> list[dict[str, Any]]:
     """Lista las épicas del tablero (issue_type=epic): id, title, column_id, priority."""
     detail = await _prepare(ctx).get_initiative(initiative_id)
     epics: list[dict[str, Any]] = []
@@ -1547,7 +1557,7 @@ async def list_epics(ctx: Context, initiative_id: str) -> list[dict[str, Any]]:
 # ── tools: vínculos ────────────────────────────────────────────────────────────
 @mcp.tool(annotations=CREA)
 async def link_tasks(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     target_id: str,
@@ -1563,7 +1573,7 @@ async def link_tasks(
 
 @mcp.tool(annotations=SOLO_LEE)
 async def get_task_links(
-    ctx: Context, initiative_id: str, task_id: str
+    ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
     """Lista los vínculos de una tarjeta desde su óptica: cada uno con `id` (del vínculo),
     `link_type` (blocks|is_blocked_by|relates_to), `other_id` y `other_title` (la otra tarjeta).
@@ -1574,7 +1584,7 @@ async def get_task_links(
 
 @mcp.tool(annotations=BORRA)
 async def unlink_tasks(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     target_id: str,
@@ -1610,7 +1620,7 @@ async def unlink_tasks(
 # ── tools: vínculos de repositorio (ADR-0016, Opción A) ──────────────────────────
 @mcp.tool(annotations=CREA)
 async def link_repo(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     url: str,
@@ -1629,7 +1639,7 @@ async def link_repo(
 
 @mcp.tool(annotations=SOLO_LEE)
 async def get_repo_links(
-    ctx: Context, initiative_id: str, task_id: str
+    ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
     """Lista los recursos de repositorio de una tarjeta: cada uno con `id` (del vínculo), `url`,
     `kind` (repository|branch|pull_request|commit) y `title`. Útil antes de `unlink_repo`.
@@ -1639,7 +1649,7 @@ async def get_repo_links(
 
 @mcp.tool(annotations=BORRA)
 async def unlink_repo(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     url: str,
@@ -1661,14 +1671,14 @@ async def unlink_repo(
 
 # ── tools: sprints (Scrum) ─────────────────────────────────────────────────────
 @mcp.tool(annotations=SOLO_LEE)
-async def list_sprints(ctx: Context, initiative_id: str) -> list[dict[str, Any]]:
+async def list_sprints(ctx: Ctx, initiative_id: str) -> list[dict[str, Any]]:
     """Lista los sprints del tablero (id, name, state future|active|closed, goal, fechas)."""
     return await _prepare(ctx).list_sprints(initiative_id)
 
 
 @mcp.tool(annotations=CREA)
 async def create_sprint(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     name: str,
     goal: str = "",
@@ -1687,7 +1697,7 @@ async def create_sprint(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def start_sprint(
-    ctx: Context, initiative_id: str, sprint_id: str, agent_model: str = ""
+    ctx: Ctx, initiative_id: str, sprint_id: str, agent_model: str = ""
 ) -> dict[str, Any]:
     """Arranca un sprint (future → active). Falla si ya hay otro sprint activo en el tablero."""
     return await _prepare(ctx, agent_model).start_sprint(initiative_id, sprint_id)
@@ -1695,7 +1705,7 @@ async def start_sprint(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def complete_sprint(
-    ctx: Context, initiative_id: str, sprint_id: str, agent_model: str = ""
+    ctx: Ctx, initiative_id: str, sprint_id: str, agent_model: str = ""
 ) -> dict[str, Any]:
     """Completa un sprint (active → closed); las tarjetas sin terminar vuelven al backlog."""
     return await _prepare(ctx, agent_model).complete_sprint(initiative_id, sprint_id)
@@ -1703,7 +1713,7 @@ async def complete_sprint(
 
 @mcp.tool(annotations=ACTUALIZA)
 async def assign_task_to_sprint(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     sprint_id: str | None = None,
@@ -1720,7 +1730,7 @@ async def assign_task_to_sprint(
 # ── tools: adjuntos ────────────────────────────────────────────────────────────
 @mcp.tool(annotations=SOLO_LEE)
 async def list_task_attachments(
-    ctx: Context, initiative_id: str, task_id: str
+    ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
     """Lista los adjuntos (metadatos) de una tarjeta: id, filename, content_type, size, quién lo
     subió y cuándo. Para VER o leer el contenido de uno, usa `read_task_attachment` con su id.
@@ -1730,7 +1740,7 @@ async def list_task_attachments(
 
 @mcp.tool(annotations=SOLO_LEE, structured_output=False)  # imagen o texto
 async def read_task_attachment(
-    ctx: Context, initiative_id: str, task_id: str, attachment_id: str
+    ctx: Ctx, initiative_id: str, task_id: str, attachment_id: str
 ) -> Image | str:
     """Lee un adjunto de una tarjeta por su id (el id sale de `list_task_attachments`).
 
@@ -1748,7 +1758,7 @@ async def read_task_attachment(
 
 @mcp.tool(annotations=CREA)
 async def upload_task_attachment(
-    ctx: Context,
+    ctx: Ctx,
     initiative_id: str,
     task_id: str,
     path: str = "",
@@ -1786,7 +1796,7 @@ async def upload_task_attachment(
 
 @mcp.tool(annotations=BORRA)
 async def delete_task_attachment(
-    ctx: Context, initiative_id: str, task_id: str, attachment_id: str
+    ctx: Ctx, initiative_id: str, task_id: str, attachment_id: str
 ) -> dict[str, Any]:
     """Borra un adjunto de una tarjeta. **Es irreversible**: el archivo no se recupera.
 
@@ -1919,7 +1929,7 @@ class NoteSpec(BaseModel):
 
 @mcp.tool(annotations=CREA)
 async def create_note(
-    ctx: Context,
+    ctx: Ctx,
     space_id: str,
     title: str,
     markdown: str = "",
@@ -1945,7 +1955,7 @@ async def create_note(
 
 @mcp.tool(annotations=CREA)
 async def write_note(
-    ctx: Context, document_id: str, markdown: str, mode: str = "replace"
+    ctx: Ctx, document_id: str, markdown: str, mode: str = "replace"
 ) -> dict[str, Any]:
     """Escribe markdown en una nota YA existente. `mode`: replace (pisa, deja versión en el
     historial) o append (añade al final, sin conflicto).
@@ -1961,7 +1971,7 @@ async def write_note(
 
 @mcp.tool(annotations=CREA)
 async def create_note_collection(
-    ctx: Context,
+    ctx: Ctx,
     space_id: str,
     folder_title: str,
     notes: list[NoteSpec],
@@ -1988,14 +1998,14 @@ async def create_note_collection(
 
 
 @mcp.tool(annotations=ACTUALIZA)
-async def move_note(ctx: Context, document_id: str, parent_id: str | None = None) -> dict[str, Any]:
+async def move_note(ctx: Ctx, document_id: str, parent_id: str | None = None) -> dict[str, Any]:
     """Cuelga la nota de otra carpeta/nota, o la saca a la raíz (sin `parent_id`)."""
     return await _prepare(ctx).update_document(document_id, {"parent_id": parent_id})
 
 
 @mcp.tool(annotations=ACTUALIZA)
 async def rename_note(
-    ctx: Context, document_id: str, title: str, icon: str | None = None
+    ctx: Ctx, document_id: str, title: str, icon: str | None = None
 ) -> dict[str, Any]:
     """Renombra una nota (y opcionalmente cambia su icono)."""
     body: dict[str, Any] = {"title": title}
@@ -2005,7 +2015,7 @@ async def rename_note(
 
 
 @mcp.tool(annotations=BORRA)
-async def delete_note(ctx: Context, document_id: str) -> str:
+async def delete_note(ctx: Ctx, document_id: str) -> str:
     """Borra una nota (y con ella deja huérfanas a sus hijas: muévelas antes si importan).
 
     Borrar una nota es decisión humana, así que se **pregunta** antes, diciendo cuál es y cuántas
@@ -2033,7 +2043,7 @@ async def delete_note(ctx: Context, document_id: str) -> str:
 
 
 @mcp.tool(annotations=CREA)
-async def link_notes(ctx: Context, from_document_id: str, to_document_id: str) -> dict[str, Any]:
+async def link_notes(ctx: Ctx, from_document_id: str, to_document_id: str) -> dict[str, Any]:
     """Enlaza dos notas añadiendo al final de la origen un [[wikilink]] a la destino.
 
     El enlace queda VISIBLE en la nota (así funciona el producto: el wikilink del contenido es lo
@@ -2050,7 +2060,7 @@ async def link_notes(ctx: Context, from_document_id: str, to_document_id: str) -
 
 @mcp.tool(annotations=CREA)
 async def link_note_to_task(
-    ctx: Context, document_id: str, target_id: str, lead: str = ""
+    ctx: Ctx, document_id: str, target_id: str, lead: str = ""
 ) -> dict[str, Any]:
     """Ata una nota a una tarjeta (o semilla) que YA existe: el `#tarjeta` sin abrir el editor.
 
@@ -2071,7 +2081,7 @@ async def link_note_to_task(
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def list_notes(ctx: Context, space_id: str) -> list[dict[str, Any]]:
+async def list_notes(ctx: Ctx, space_id: str) -> list[dict[str, Any]]:
     """El árbol de notas del Área: id, título, icono y las hijas anidadas en `children`."""
     docs = await _prepare(ctx).list_documents(space_id)
     by_id: dict[str, dict[str, Any]] = {}
@@ -2091,7 +2101,7 @@ async def list_notes(ctx: Context, space_id: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def read_note(ctx: Context, document_id: str) -> dict[str, Any]:
+async def read_note(ctx: Ctx, document_id: str) -> dict[str, Any]:
     """Lee una nota completa EN MARKDOWN (encabezados, listas, tablas, código, enlaces).
 
     Léela antes de opinar o de escribir encima: es la documentación del proyecto, no contexto
@@ -2109,20 +2119,20 @@ async def read_note(ctx: Context, document_id: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def search_notes(ctx: Context, space_id: str, query: str) -> list[dict[str, Any]]:
+async def search_notes(ctx: Ctx, space_id: str, query: str) -> list[dict[str, Any]]:
     """Busca por CONTENIDO en las notas del Área; devuelve la nota y la frase donde aparece."""
     return await _prepare(ctx).search_documents(space_id, query)
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def get_note_backlinks(ctx: Context, document_id: str) -> list[dict[str, Any]]:
+async def get_note_backlinks(ctx: Ctx, document_id: str) -> list[dict[str, Any]]:
     """Qué apunta a esta nota: los [[wikilinks]] y menciones que entran desde otras notas."""
     return await _prepare(ctx).document_backlinks(document_id)
 
 
 @mcp.tool(annotations=CREA)
 async def extract_tasks_from_note(
-    ctx: Context, document_id: str, initiative_id: str
+    ctx: Ctx, document_id: str, initiative_id: str
 ) -> list[dict[str, Any]]:
     """Saca tarjetas del Tablero desde una nota, con la referencia a su párrafo de origen.
 
@@ -2134,7 +2144,7 @@ async def extract_tasks_from_note(
 
 
 @mcp.tool(annotations=SOLO_LEE)
-async def get_task_notes(ctx: Context, task_id: str) -> dict[str, Any]:
+async def get_task_notes(ctx: Ctx, task_id: str) -> dict[str, Any]:
     """Qué documentación respalda una tarjeta: su nota de ORIGEN (si nació de una nota, con el
     párrafo exacto) y las notas que la MENCIONAN (chips #tarjeta)."""
     client = _prepare(ctx)

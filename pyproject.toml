@@ -52,9 +52,9 @@ Issues = "https://github.com/Collie-Valley/foundry-mcp/issues"
 [project.scripts]
 foundry-boards-mcp = "foundry_mcp.server:main"
 
-# Grupo de desarrollo (PEP 735): `uv run pytest -q` ya funciona sin `--with pytest`.
+# Grupo de desarrollo (PEP 735): `uv run pytest -q` y `uv run mypy` funcionan sin `--with`.
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "mypy>=2.4"]
 
 [build-system]
 requires = ["hatchling"]
@@ -79,3 +79,11 @@ allowed-confusables = ["–"]
 # En una prueba, leer un archivo de unos kilobytes dentro de una función asíncrona no bloquea a
 # nadie: no hay usuarios esperando ni un bucle de eventos compartido.
 "tests/**" = ["ASYNC240"]
+
+# Tipos en modo estricto, la misma vara que el backend de Foundry. Se comprueba el paquete que se
+# publica, no las pruebas (que pasan dobles donde va un `Context` a propósito). `python_version` es
+# el mínimo que promete `requires-python`: lo que pase aquí no puede usar nada más nuevo.
+[tool.mypy]
+python_version = "3.10"
+strict = true
+packages = ["foundry_mcp"]

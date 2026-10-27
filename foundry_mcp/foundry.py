@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -56,7 +56,8 @@ class FoundryClient:
             raise FoundryError("Login rechazado (401): email o contraseña incorrectos.")
         if r.status_code >= 400:
             raise FoundryError(_error_message(r))
-        return r.json()["access_token"]
+        token: str = r.json()["access_token"]
+        return token
 
     async def _ensure_token(self) -> None:
         if self.token is None:
@@ -88,30 +89,39 @@ class FoundryClient:
             return None
         return r.json()
 
+    # `_json` con nombre de lo que devuelve el endpoint, para que el tipo llegue a quien llama. Es un
+    # cast, no una comprobación: la forma la fija el contrato de la API (el mismo que usa el
+    # frontend), y validarla aquí cambiaría lo que ve la herramienta ante una respuesta rara.
+    async def _obj(self, method: str, path: str, **kw: Any) -> dict[str, Any]:
+        return cast(dict[str, Any], await self._json(method, path, **kw))
+
+    async def _list(self, method: str, path: str, **kw: Any) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], await self._json(method, path, **kw))
+
     # ── cuenta / espacios / miembros ─────────────────────────────────────────
     async def me(self) -> dict[str, Any]:
-        return await self._json("GET", "/me")
+        return await self._obj("GET", "/me")
 
     async def list_spaces(self) -> list[dict[str, Any]]:
-        return await self._json("GET", "/spaces")
+        return await self._list("GET", "/spaces")
 
     async def list_members(self, space_id: str) -> list[dict[str, Any]]:
-        return await self._json("GET", f"/spaces/{space_id}/members")
+        return await self._list("GET", f"/spaces/{space_id}/members")
 
     # ── tableros / iniciativas ───────────────────────────────────────────────
     async def list_personal_boards(self) -> list[dict[str, Any]]:
-        return await self._json("GET", "/me/boards")
+        return await self._list("GET", "/me/boards")
 
     async def list_space_initiatives(self, space_id: str) -> list[dict[str, Any]]:
-        return await self._json("GET", f"/spaces/{space_id}/initiatives")
+        return await self._list("GET", f"/spaces/{space_id}/initiatives")
 
     async def get_initiative(self, initiative_id: str) -> dict[str, Any]:
-        return await self._json("GET", f"/initiatives/{initiative_id}")
+        return await self._obj("GET", f"/initiatives/{initiative_id}")
 
     async def list_board_presets(self) -> list[dict[str, Any]]:
         """Catálogo de plantillas de columnas para el alta (FNV-257): key, label, template,
         is_default y las columnas de cada una con su categoría."""
-        return await self._json("GET", "/board-presets")
+        return await self._list("GET", "/board-presets")
 
     async def create_personal_board(
         self,
@@ -119,7 +129,7 @@ class FoundryClient:
         preset: str | None = None,
         columns: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        return await self._json("POST", "/me/boards", json=_board_body(title, preset, columns))
+        return await self._obj("POST", "/me/boards", json=_board_body(title, preset, columns))
 
     async def create_space_board(
         self,
@@ -128,12 +138,12 @@ class FoundryClient:
         preset: str | None = None,
         columns: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST", f"/spaces/{space_id}/boards", json=_board_body(title, preset, columns)
         )
 
     async def move_board(self, initiative_id: str, space_id: str) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST", f"/initiatives/{initiative_id}/move", json={"space_id": space_id}
         )
 
@@ -188,12 +198,12 @@ class FoundryClient:
 
     # ── tarjetas (Kanban) ────────────────────────────────────────────────────
     async def create_task(self, initiative_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        return await self._json("POST", f"/initiatives/{initiative_id}/tasks", json=body)
+        return await self._obj("POST", f"/initiatives/{initiative_id}/tasks", json=body)
 
     async def move_task(
         self, initiative_id: str, task_id: str, column_id: str, order: int
     ) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/move",
             json={"column_id": column_id, "order": order},
@@ -202,7 +212,7 @@ class FoundryClient:
     async def edit_task(
         self, initiative_id: str, task_id: str, body: dict[str, Any]
     ) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST", f"/initiatives/{initiative_id}/tasks/{task_id}/edit", json=body
         )
 
@@ -213,32 +223,32 @@ class FoundryClient:
     async def set_task_hierarchy(
         self, initiative_id: str, task_id: str, body: dict[str, Any]
     ) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST", f"/initiatives/{initiative_id}/tasks/{task_id}/hierarchy", json=body
         )
 
     async def set_task_details(
         self, initiative_id: str, task_id: str, body: dict[str, Any]
     ) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST", f"/initiatives/{initiative_id}/tasks/{task_id}/details", json=body
         )
 
     # ── etiquetas (ADR-0014, E3·D/E6) ────────────────────────────────────────
     async def list_labels(self, initiative_id: str) -> list[dict[str, Any]]:
-        return await self._json("GET", f"/initiatives/{initiative_id}/labels")
+        return await self._list("GET", f"/initiatives/{initiative_id}/labels")
 
     async def create_label(
         self, initiative_id: str, name: str, color: str | None = None
     ) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST", f"/initiatives/{initiative_id}/labels", json={"name": name, "color": color}
         )
 
     async def set_task_labels(
         self, initiative_id: str, task_id: str, label_ids: list[str]
     ) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "PUT",
             f"/initiatives/{initiative_id}/tasks/{task_id}/labels",
             json={"label_ids": label_ids},
@@ -248,14 +258,14 @@ class FoundryClient:
     async def link_tasks(
         self, initiative_id: str, task_id: str, target_id: str, link_type: str
     ) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/links",
             json={"target_id": target_id, "link_type": link_type},
         )
 
     async def list_task_links(self, initiative_id: str, task_id: str) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "GET", f"/initiatives/{initiative_id}/tasks/{task_id}/links"
         )
 
@@ -263,7 +273,7 @@ class FoundryClient:
         self, initiative_id: str, task_id: str, link_id: str
     ) -> list[dict[str, Any]]:
         """DELETE de un vínculo por su id; devuelve los vínculos restantes de la tarjeta."""
-        return await self._json(
+        return await self._list(
             "DELETE", f"/initiatives/{initiative_id}/tasks/{task_id}/links/{link_id}"
         )
 
@@ -271,14 +281,14 @@ class FoundryClient:
     async def link_repo(
         self, initiative_id: str, task_id: str, url: str, kind: str, title: str
     ) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/repo-links",
             json={"url": url, "kind": kind, "title": title},
         )
 
     async def list_repo_links(self, initiative_id: str, task_id: str) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "GET", f"/initiatives/{initiative_id}/tasks/{task_id}/repo-links"
         )
 
@@ -286,37 +296,37 @@ class FoundryClient:
         self, initiative_id: str, task_id: str, link_id: str
     ) -> list[dict[str, Any]]:
         """DELETE de un vínculo de repo por su id; devuelve los restantes de la tarjeta."""
-        return await self._json(
+        return await self._list(
             "DELETE", f"/initiatives/{initiative_id}/tasks/{task_id}/repo-links/{link_id}"
         )
 
     # ── historial estructurado (ADR-0014, E4/E6) ─────────────────────────────
     async def get_task_history(self, initiative_id: str, task_id: str) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "GET", f"/initiatives/{initiative_id}/tasks/{task_id}/history"
         )
 
     # ── sprints (ADR-0014, E5/E6) ────────────────────────────────────────────
     async def list_sprints(self, initiative_id: str) -> list[dict[str, Any]]:
-        return await self._json("GET", f"/initiatives/{initiative_id}/sprints")
+        return await self._list("GET", f"/initiatives/{initiative_id}/sprints")
 
     async def create_sprint(self, initiative_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        return await self._json("POST", f"/initiatives/{initiative_id}/sprints", json=body)
+        return await self._obj("POST", f"/initiatives/{initiative_id}/sprints", json=body)
 
     async def start_sprint(self, initiative_id: str, sprint_id: str) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST", f"/initiatives/{initiative_id}/sprints/{sprint_id}/start"
         )
 
     async def complete_sprint(self, initiative_id: str, sprint_id: str) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST", f"/initiatives/{initiative_id}/sprints/{sprint_id}/complete", json={}
         )
 
     async def assign_task_sprint(
         self, initiative_id: str, task_id: str, sprint_id: str | None
     ) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/sprint",
             json={"sprint_id": sprint_id},
@@ -325,7 +335,7 @@ class FoundryClient:
     async def create_tasks_from_seeds(
         self, initiative_id: str, seed_ids: list[str]
     ) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "POST", f"/initiatives/{initiative_id}/tasks/from-seeds", json={"seed_ids": seed_ids}
         )
 
@@ -333,7 +343,7 @@ class FoundryClient:
     async def list_task_comments(
         self, initiative_id: str, task_id: str
     ) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "GET", f"/initiatives/{initiative_id}/tasks/{task_id}/comments"
         )
 
@@ -366,7 +376,7 @@ class FoundryClient:
             payload["agent_source"] = agent_source
         if as_agent and agent_model is not None:
             payload["agent_model"] = agent_model
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/comments",
             json=payload,
@@ -378,7 +388,7 @@ class FoundryClient:
     ) -> dict[str, Any]:
         """Añade un criterio de aceptación. `as_agent=True` (default del MCP) ⇒ nace `proposed`
         (procedencia `ia`); una persona lo acepta/descarta en el tablero."""
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/criteria",
             json={"text": text, "as_agent": as_agent},
@@ -403,7 +413,7 @@ class FoundryClient:
         }
         if repo_link_id:
             payload["repo_link_id"] = repo_link_id
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/decisions",
             json=payload,
@@ -414,7 +424,7 @@ class FoundryClient:
     ) -> list[dict[str, Any]]:
         """Criterios de aceptación de una tarjeta con su estado del gate (proposed/accepted/
         rejected), procedencia y si ya se cumplen (`checked`)."""
-        return await self._json(
+        return await self._list(
             "GET", f"/initiatives/{initiative_id}/tasks/{task_id}/criteria"
         )
 
@@ -423,7 +433,7 @@ class FoundryClient:
     ) -> dict[str, Any]:
         """Gate humano de un criterio: `accept=True` lo vuelve oficial; `False` lo descarta."""
         verb = "accept" if accept else "reject"
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/criteria/{criterion_id}/{verb}",
         )
@@ -433,7 +443,7 @@ class FoundryClient:
     ) -> list[dict[str, Any]]:
         """Decisiones de diseño de una tarjeta con su estado del gate (proposed/accepted/
         rejected), procedencia y el vínculo de repo al que atan (si lo hay)."""
-        return await self._json(
+        return await self._list(
             "GET", f"/initiatives/{initiative_id}/tasks/{task_id}/decisions"
         )
 
@@ -442,7 +452,7 @@ class FoundryClient:
     ) -> dict[str, Any]:
         """Gate humano de una decisión: `accept=True` la vuelve oficial; `False` la descarta."""
         verb = "accept" if accept else "reject"
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/decisions/{decision_id}/{verb}",
         )
@@ -453,7 +463,7 @@ class FoundryClient:
         """Gate humano de una tarjeta propuesta por la IA (`status_agent="proposed"`):
         `accept=True` la vuelve oficial; `False` la marca `rejected` (el front la oculta)."""
         verb = "accept" if accept else "reject"
-        return await self._json(
+        return await self._obj(
             "POST", f"/initiatives/{initiative_id}/tasks/{task_id}/{verb}"
         )
 
@@ -471,7 +481,7 @@ class FoundryClient:
         """Deja un caso de prueba en un entregable (historia, o tarea/bug/incidencia suelta; el
         backend rechaza épicas y subtareas). `as_agent=True` (default del MCP) ⇒ procedencia `ia`.
         Nace `pending`: no hay gate, se valida corriéndolo."""
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/test-cases",
             json={"title": title, "steps": steps, "expected": expected, "as_agent": as_agent},
@@ -482,7 +492,7 @@ class FoundryClient:
     ) -> list[dict[str, Any]]:
         """Casos de prueba de una tarjeta con su estado (`pending`/`passed`/`failed`), pasos,
         resultado esperado y procedencia."""
-        return await self._json(
+        return await self._list(
             "GET", f"/initiatives/{initiative_id}/tasks/{task_id}/test-cases"
         )
 
@@ -490,7 +500,7 @@ class FoundryClient:
         self, initiative_id: str, task_id: str, test_case_id: str, status: str
     ) -> dict[str, Any]:
         """Registra el resultado de correr un caso: `status` = passed | failed | pending."""
-        return await self._json(
+        return await self._obj(
             "PATCH",
             f"/initiatives/{initiative_id}/tasks/{task_id}/test-cases/{test_case_id}",
             json={"status": status},
@@ -502,7 +512,7 @@ class FoundryClient:
         """Bitácora de corridas de los casos de prueba (FNV-159): todas las de la tarjeta o, con
         `test_case_id`, las de un caso. Cada corrida lleva resultado, autor, etapa y fecha."""
         params = {"test_case_id": test_case_id} if test_case_id else None
-        return await self._json(
+        return await self._list(
             "GET",
             f"/initiatives/{initiative_id}/tasks/{task_id}/test-executions",
             params=params,
@@ -512,7 +522,7 @@ class FoundryClient:
     async def list_task_attachments(
         self, initiative_id: str, task_id: str
     ) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "GET", f"/initiatives/{initiative_id}/tasks/{task_id}/attachments"
         )
 
@@ -547,7 +557,7 @@ class FoundryClient:
         No usa `json=`: el endpoint espera un `UploadFile`, así que va en `files=`. El backend
         rechaza lo vacío (400) y lo que pase de 10 MB (413).
         """
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/attachments",
             files={"file": (filename, data, content_type)},
@@ -563,23 +573,23 @@ class FoundryClient:
 
     # ── notas (contexto docs; FNV-131/132) ───────────────────────────────────
     async def list_documents(self, space_id: str) -> list[dict[str, Any]]:
-        return await self._json("GET", f"/spaces/{space_id}/documents")
+        return await self._list("GET", f"/spaces/{space_id}/documents")
 
     async def get_document(self, document_id: str) -> dict[str, Any]:
         """El documento + sus bloques materializados (la foto que también ve la búsqueda)."""
-        return await self._json("GET", f"/documents/{document_id}")
+        return await self._obj("GET", f"/documents/{document_id}")
 
     async def create_document(
         self, space_id: str, title: str, parent_id: str | None = None
     ) -> dict[str, Any]:
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/spaces/{space_id}/documents",
             json={"title": title, "parent_id": parent_id},
         )
 
     async def update_document(self, document_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        return await self._json("PATCH", f"/documents/{document_id}", json=body)
+        return await self._obj("PATCH", f"/documents/{document_id}", json=body)
 
     async def delete_document(self, document_id: str) -> None:
         await self._json("DELETE", f"/documents/{document_id}")
@@ -588,7 +598,7 @@ class FoundryClient:
         self, document_id: str, markdown: str, mode: str
     ) -> dict[str, Any]:
         """PUT /documents/{id}/content (FNV-130): el servidor traduce el markdown a bloques."""
-        return await self._json(
+        return await self._obj(
             "PUT",
             f"/documents/{document_id}/content",
             json={"markdown": markdown, "mode": mode},
@@ -598,34 +608,35 @@ class FoundryClient:
         self, document_id: str, target_id: str, lead: str = ""
     ) -> dict[str, Any]:
         """POST /documents/{id}/mentions (FNV-132): ata la nota a una tarjeta/semilla existente."""
-        return await self._json(
+        return await self._obj(
             "POST",
             f"/documents/{document_id}/mentions",
             json={"target_id": target_id, "lead": lead},
         )
 
     async def search_documents(self, space_id: str, query: str) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "GET", f"/spaces/{space_id}/documents/search", params={"q": query}
         )
 
     async def document_backlinks(self, document_id: str) -> list[dict[str, Any]]:
-        return await self._json("GET", f"/documents/{document_id}/backlinks")
+        return await self._list("GET", f"/documents/{document_id}/backlinks")
 
     async def extract_tasks_from_document(
         self, document_id: str, initiative_id: str
     ) -> list[dict[str, Any]]:
-        return await self._json(
+        return await self._list(
             "POST",
             f"/documents/{document_id}/extract-tasks",
             json={"initiative_id": initiative_id},
         )
 
     async def task_origin(self, task_id: str) -> dict[str, Any] | None:
-        return await self._json("GET", f"/tasks/{task_id}/origin")
+        origin: dict[str, Any] | None = await self._json("GET", f"/tasks/{task_id}/origin")
+        return origin
 
     async def task_mentions(self, task_id: str) -> list[dict[str, Any]]:
-        return await self._json("GET", f"/tasks/{task_id}/mentions")
+        return await self._list("GET", f"/tasks/{task_id}/mentions")
 
     async def close(self) -> None:
         await self._c.aclose()

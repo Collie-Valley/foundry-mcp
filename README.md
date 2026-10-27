@@ -282,6 +282,7 @@ cd foundry-mcp
 uv sync                 # crea .venv con las dependencias y el grupo dev
 uv run pytest -q        # las pruebas
 uvx ruff check .        # el estilo, con la configuración de pyproject.toml
+uv run mypy             # los tipos, en modo estricto (también desde pyproject.toml)
 ```
 
 En Windows, `.\run.ps1` hace el `uv sync` y comprueba que el servidor carga y lista sus tools.
@@ -304,7 +305,7 @@ Con una copia del código, el MCP lee el `.env` de la raíz del repositorio:
 [`.env.example`](./.env.example) dice qué admite. Ese `.env` gana sobre el bloque `env` del cliente, y nunca se versiona.
 
 El estilo se comprueba con `ruff check` y nada más: el formateador automático no se usa en este
-proyecto. Las pruebas cubren el cliente HTTP y los ayudantes del servidor con dobles, sin hablar
+proyecto. Los tipos, con `mypy --strict` sobre el paquete (no sobre las pruebas). Las pruebas cubren el cliente HTTP y los ayudantes del servidor con dobles, sin hablar
 con un Foundry real.
 
 ## Publicar una versión
