@@ -51,30 +51,77 @@ configuración. Es lo mismo que trae [`mcp.json.example`](./mcp.json.example):
 }
 ```
 
-**Codex**, en `~/.codex/config.toml`:
+**Codex.** En una línea:
+
+```bash
+codex mcp add foundry-boards -- uvx foundry-boards-mcp
+```
+
+O a mano en `~/.codex/config.toml` (o en `.codex/config.toml` de un proyecto de confianza):
 
 ```toml
 [mcp_servers.foundry-boards]
 command = "uvx"
 args = ["foundry-boards-mcp"]
+# La primera vez uvx descarga el paquete: el arranque puede pasar de los 10 s que da Codex.
+startup_timeout_sec = 60
+# Pide confirmación solo para lo que escribe: las herramientas de lectura van marcadas como tales.
+default_tools_approval_mode = "writes"
+
+[mcp_servers.foundry-boards.env]
+# Codex carga todas las herramientas en el contexto: elige solo los grupos que uses.
+FOUNDRY_TOOLSETS = "tableros,qa"
 ```
 
-**OpenCode**, en `opencode.json`:
+- **No pongas la contraseña en este fichero.** Codex sabe abrir el diálogo de inicio de sesión.
+  Para automatizar sin diálogo, define `FOUNDRY_TOKEN` en tu entorno y reenvíala con
+  `env_vars = ["FOUNDRY_TOKEN"]`, sin escribir su valor.
+- En una ejecución sin interfaz (`codex exec`), las herramientas que escriben fallan con *«MCP tool
+  call requires approval, but approval policy is never»* hasta que las apruebes, por ejemplo con
+  `tools.add_task_comment.approval_mode = "approve"` en ese mismo bloque.
+
+**OpenCode.** En `opencode.json` (OpenCode 1.x):
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "foundry-boards": { "type": "local", "command": ["uvx", "foundry-boards-mcp"], "enabled": true }
+    "foundry-boards": {
+      "type": "local",
+      "command": ["uvx", "foundry-boards-mcp"],
+      "enabled": true,
+      "timeout": 60000
+    }
   }
 }
 ```
 
-Para comprobarlo, pídele al agente *«usa whoami de foundry-boards»*. La primera vez se abre un
-diálogo para entrar con tu correo y tu contraseña; si marcas **«recordar»**, no te lo vuelve a pedir
-hasta que caduque la sesión (ver [Autenticación](#autenticación)).
+Las variables van en `"environment"`, no en `"env"`: OpenCode ignora `env` sin avisar. En OpenCode
+v2 el fichero es `opencode.jsonc`, los servidores van bajo `mcp.servers`, se apagan con
+`"disabled": true` y las variables se citan como `{env:NOMBRE}`:
 
-No hay que configurar ningún backend: por omisión habla con el Foundry público. Para fijar una
-versión concreta, usa `"args": ["foundry-boards-mcp@0.1.1"]`.
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "foundry-boards": {
+        "type": "local",
+        "command": ["uvx", "foundry-boards-mcp"],
+        "environment": { "FOUNDRY_TOKEN": "{env:FOUNDRY_TOKEN}" }
+      }
+    }
+  }
+}
+```
+
+Para comprobarlo, pídele al agente *«usa whoami de foundry-boards y declara tu modelo»*. La primera
+vez se abre un diálogo para entrar con tu correo y tu contraseña; si marcas **«recordar»**, no te lo
+vuelve a pedir hasta que caduque la sesión (ver [Autenticación](#autenticación)).
+
+No hay que configurar ningún backend: por omisión habla con el Foundry público. Sin versión, `uvx`
+usa la última que tenga en caché; para fijar una, usa `foundry-boards-mcp@<versión>` en el comando.
+Si la fijas, al salir una nueva hay que subirla a mano en cada cliente.
 
 ## Qué puedes pedirle
 
