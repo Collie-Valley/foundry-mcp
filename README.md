@@ -51,30 +51,78 @@ configuración. Es lo mismo que trae [`mcp.json.example`](./mcp.json.example):
 }
 ```
 
-**Codex**, en `~/.codex/config.toml`:
+**Codex.** En una línea:
+
+```bash
+codex mcp add foundry-boards -- uvx foundry-boards-mcp
+```
+
+O a mano en `~/.codex/config.toml` (o en `.codex/config.toml` de un proyecto de confianza):
 
 ```toml
 [mcp_servers.foundry-boards]
 command = "uvx"
 args = ["foundry-boards-mcp"]
+# La primera vez uvx descarga el paquete: el arranque puede pasar de los 10 s que da Codex.
+startup_timeout_sec = 60
+# Pide confirmación solo para lo que escribe: las herramientas de lectura van marcadas como tales.
+default_tools_approval_mode = "writes"
+
+[mcp_servers.foundry-boards.env]
+# Codex carga todas las herramientas en el contexto: elige solo los grupos que uses.
+FOUNDRY_TOOLSETS = "tableros,qa"
 ```
 
-**OpenCode**, en `opencode.json`:
+- **No pongas la contraseña en este fichero.** Codex sabe abrir el diálogo de inicio de sesión.
+  Para automatizar sin diálogo, define `FOUNDRY_TOKEN` en tu entorno y reenvíala con
+  `env_vars = ["FOUNDRY_TOKEN"]`, sin escribir su valor.
+- En una ejecución sin interfaz (`codex exec`), las herramientas que escriben fallan con *«MCP tool
+  call requires approval, but approval policy is never»* hasta que las apruebes, por ejemplo con
+  `tools.add_task_comment.approval_mode = "approve"` en ese mismo bloque.
+
+**OpenCode.** En `opencode.json` (cualquier OpenCode desde la 1.18):
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "foundry-boards": { "type": "local", "command": ["uvx", "foundry-boards-mcp"], "enabled": true }
+    "foundry-boards": {
+      "type": "local",
+      "command": ["uvx", "foundry-boards-mcp"],
+      "enabled": true,
+      "timeout": 60000
+    }
   }
 }
 ```
 
-Para comprobarlo, pídele al agente *«usa whoami de foundry-boards»*. La primera vez se abre un
-diálogo para entrar con tu correo y tu contraseña; si marcas **«recordar»**, no te lo vuelve a pedir
-hasta que caduque la sesión (ver [Autenticación](#autenticación)).
+Las variables van en `"environment"`, no en `"env"`: OpenCode ignora `env` sin avisar. El formato
+nuevo, el de la documentación v2 de OpenCode, lo entiende ya la 1.19: fichero `opencode.jsonc`,
+servidores bajo `mcp.servers`, `"disabled": true` para apagarlos y variables citadas como
+`{env:NOMBRE}`:
 
-No hay que configurar ningún backend: por omisión habla con el Foundry público. Para fijar una
-versión concreta, usa `"args": ["foundry-boards-mcp@0.1.1"]`.
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "foundry-boards": {
+        "type": "local",
+        "command": ["uvx", "foundry-boards-mcp"],
+        "environment": { "FOUNDRY_TOKEN": "{env:FOUNDRY_TOKEN}" }
+      }
+    }
+  }
+}
+```
+
+Para comprobarlo, pídele al agente *«usa whoami de foundry-boards y declara tu modelo»*. La primera
+vez se abre un diálogo para entrar con tu correo y tu contraseña; si marcas **«recordar»**, no te lo
+vuelve a pedir hasta que caduque la sesión (ver [Autenticación](#autenticación)).
+
+No hay que configurar ningún backend: por omisión habla con el Foundry público. Sin versión, `uvx`
+usa la última que tenga en caché; para fijar una, usa `foundry-boards-mcp@<versión>` en el comando.
+Si la fijas, al salir una nueva hay que subirla a mano en cada cliente.
 
 ## Qué puedes pedirle
 
@@ -94,7 +142,8 @@ cliente) o, si trabajas con una copia del código, en un `.env` en su raíz.
 | `FOUNDRY_API_BASE` | Otro backend: el tuyo en local (`http://localhost:8000/api/v1`) o uno propio. Por omisión, `https://foundry.collie.digital/api/v1`. |
 | `FOUNDRY_TIMEOUT` | Segundos de espera a la API (30 por omisión). |
 | `FOUNDRY_AGENT_SOURCE` | Qué cliente firma lo que crea el agente. `auto` lo deduce de la sesión MCP; si tu cliente se anuncia con un nombre genérico, fíjalo (`codex`, `claude_code`, `opencode`, `gemini`…). |
-| `FOUNDRY_AGENT_MODEL` | El modelo que usa el agente, si es siempre el mismo. |
+| `FOUNDRY_AGENT_MODEL` | El modelo que usa el agente, si es siempre el mismo. Lo que el agente declare en la sesión manda sobre esto. |
+| `FOUNDRY_TOOLSETS` | Qué grupos de herramientas exponer, separados por comas: `tableros` (tarjetas, hilo, gates, vínculos), `qa`, `sprints`, `columnas`, `adjuntos`, `notas`. Sin la variable, todos. `login`, `logout` y `whoami` van siempre. Úsalo en clientes que cargan todas las herramientas en el contexto (Codex, los de `mcpServers`): con solo `notas` la lista pesa unos 9 000 caracteres en vez de 47 000. |
 | `FOUNDRY_TOKEN`, o `FOUNDRY_EMAIL` + `FOUNDRY_PASSWORD` | Solo para automatización o para clientes sin diálogo: el MCP entra sin preguntar. Para uso normal, no los definas. |
 
 ## Identidad del agente
@@ -103,14 +152,23 @@ Todo lo que crea el MCP (descripciones, comentarios, avances, verificaciones y c
 historial) queda marcado como hecho por una IA, con dos datos aparte:
 
 - **`agent_source`**: qué cliente lo hizo (`claude_code`, `codex`, `opencode`, `gemini`, `other` o
-  `unknown`).
-- **`agent_model`**: con qué modelo, por ejemplo `claude-sonnet-*` o `gpt-5`.
+  `unknown`). Sale solo, del nombre con el que se presenta el cliente: Claude Code (`claude-code`),
+  Codex (`codex-mcp-client`) y OpenCode (`opencode`) se reconocen sin configurar nada.
+- **`agent_model`**: con qué modelo, por ejemplo `claude-opus-5-5` o `gpt-6-luna`.
 
-Foundry lo enseña como `IA · Codex · gpt-5` junto a cada aporte, así que no hace falta firmar el
-texto. MCP no estandariza el modelo, así que conviene declararlo: con `FOUNDRY_AGENT_MODEL` si el
-proceso usa siempre el mismo, o con el argumento `agent_model` de cada herramienta si cambia
-durante la sesión. El servidor también reconoce `CODEX_MODEL`, `CLAUDE_MODEL`, `ANTHROPIC_MODEL`,
-`OPENCODE_MODEL` y `GEMINI_MODEL`.
+Foundry lo enseña como `IA · Codex · gpt-6-luna` junto a cada aporte, así que no hace falta firmar
+el texto.
+
+**El modelo hay que declararlo.** MCP no tiene un campo para él y ningún cliente se lo pasa a sus
+servidores, así que solo lo sabe el agente. Basta con decirlo **una vez**: al empezar, con
+`whoami(agent_model="…")`, o con el argumento `agent_model` de cualquier herramienta. El servidor lo
+recuerda y lo pone en todo lo que el agente haga durante la sesión, también en las herramientas que
+no tienen ese argumento (notas, columnas, adjuntos). Si se cambia de modelo a mitad de sesión, basta
+con declararlo de nuevo: manda el último. El prompt `trabajar_tarjeta` ya lo pide como primer paso.
+
+Si el proceso usa siempre el mismo modelo, también puede fijarse con `FOUNDRY_AGENT_MODEL`. Por
+compatibilidad se aceptan `CODEX_MODEL`, `CLAUDE_MODEL`, `ANTHROPIC_MODEL`, `OPENCODE_MODEL` y
+`GEMINI_MODEL`, pero solo si las defines tú: los clientes no las rellenan.
 
 La identidad la **declara el cliente**: no es una certificación y no da permisos. Lo que puede
 hacer el agente lo decide el rol de la cuenta.
@@ -133,6 +191,12 @@ token.
 El diálogo usa *elicitation* de MCP. Si tu cliente no la soporta, usa `FOUNDRY_TOKEN` o
 `FOUNDRY_EMAIL` + `FOUNDRY_PASSWORD` (ver [Configuración](#configuración)).
 
+**Protocolo.** El servidor habla la revisión **2026-07-28** de MCP (sin `initialize` ni sesión de
+protocolo) y también las anteriores, con las que conectan hoy Claude Code, Codex y OpenCode. En
+2026-07-28 el servidor ya no puede abrir un diálogo a mitad de una herramienta cualquiera: si una
+dice que no hay sesión, llama a **`login`**, que sí abre el diálogo, y repite. Las preguntas antes
+de borrar funcionan igual en las dos revisiones.
+
 ## Herramientas
 
 74 herramientas y 3 prompts. Cada una declara si **solo lee** (23), si **crea o actualiza** (45) o
@@ -144,10 +208,12 @@ borran (tarjeta, nota, adjunto, columna) además preguntan antes y dicen qué se
 | Herramienta | Qué hace |
 |---|---|
 | `login` · `logout` | Entra (abre el diálogo) o cambia de cuenta · olvida el token. |
-| `whoami` | La cuenta con la que actúa el MCP. |
+| `whoami` | La cuenta con la que actúa el MCP, y donde el agente declara su modelo. |
 | `list_spaces` | Las Áreas de trabajo que ves. |
 | `list_boards` · `list_all_boards` | Tableros personales o de un Área · todos a la vez. |
-| `get_board` | Un tablero entero: sus columnas, cada una con sus tarjetas. |
+| `get_board` | Un tablero: sus columnas con sus tarjetas, en resumen y sin las de cierre salvo que las pidas (`categories`, `detail`, `limit_per_column`). |
+| `get_task` | Una tarjeta entera, descripción incluida, por su id o su clave (`FNV-308`). |
+| `search_tasks` | Buscar tarjetas por texto, etiquetas, columna o tipo. |
 
 **Tableros y columnas**
 

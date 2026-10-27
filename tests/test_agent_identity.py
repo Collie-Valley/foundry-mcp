@@ -33,13 +33,35 @@ class ResolveAgentSourceTests(TestCase):
         self.assertEqual(_resolve_agent_source("auto"), "unknown")
         self.assertEqual(_resolve_agent_source("auto", "Cursor"), "other")
 
-    def test_explicit_model_wins_and_empty_is_unknown(self) -> None:
+    def setUp(self) -> None:
+        server._declared_model = ""  # cada prueba empieza con una sesión sin modelo declarado
+
+    def tearDown(self) -> None:
+        server._declared_model = ""
+
+    def test_without_declaration_config_or_unknown(self) -> None:
         with patch("foundry_mcp.server.load_config") as config:
             config.return_value.agent_model = "configured-model"
-            self.assertEqual(_resolve_agent_model("per-call-model"), "per-call-model")
             self.assertEqual(_resolve_agent_model(), "configured-model")
             config.return_value.agent_model = ""
             self.assertIsNone(_resolve_agent_model())
+
+    def test_declared_model_stays_for_the_rest_of_the_session(self) -> None:
+        """FNV-311: lo declarado una vez vale después, aunque no se repita y haya configuración."""
+        with patch("foundry_mcp.server.load_config") as config:
+            config.return_value.agent_model = "configured-model"
+            self.assertEqual(_resolve_agent_model("per-call-model"), "per-call-model")
+            self.assertEqual(_resolve_agent_model(), "per-call-model")
+            self.assertEqual(_resolve_agent_model("  "), "per-call-model")  # vacío no borra
+
+    def test_a_new_declaration_replaces_the_previous_one(self) -> None:
+        """Se puede cambiar de modelo a mitad de sesión (`/model`): manda el último declarado."""
+        _resolve_agent_model("gpt-6-luna")
+        self.assertEqual(_resolve_agent_model("gpt-5.6-terra"), "gpt-5.6-terra")
+        self.assertEqual(_resolve_agent_model(), "gpt-5.6-terra")
+
+    def test_declared_model_is_capped(self) -> None:
+        self.assertEqual(len(_resolve_agent_model("m" * 500) or ""), 160)
 
     def test_config_detects_client_model_environment(self) -> None:
         with patch.dict(
@@ -144,6 +166,7 @@ class FoundryClientAgentIdentityTests(IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result, {"id": "comment-1"})
+        server._declared_model = ""
         prepare.assert_called_once_with(ctx, "per-call-model")
         client.link_repo.assert_awaited_once()
         client.add_task_comment.assert_awaited_once_with(

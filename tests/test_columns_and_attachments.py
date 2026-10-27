@@ -6,19 +6,30 @@ import base64
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from mcp.server.elicitation import AcceptedElicitation, CancelledElicitation, DeclinedElicitation
+from mcp.server.mcpserver import Elicit
 
 from foundry_mcp import server
 from foundry_mcp.foundry import FoundryError, _board_body, _error_message
 from foundry_mcp.server import (
+    ConfirmForm,
     _attachment_source,
+    _Borrado,
     _default_column_id,
     _resolve_column,
     _tamano_legible,
 )
+
+# Dobles del `Context` para los resolvers: uno cuyo cliente sabe preguntar y otro que no.
+PREGUNTA: Any = SimpleNamespace(client_capabilities=SimpleNamespace(elicitation=SimpleNamespace()))
+NO_PREGUNTA: Any = SimpleNamespace(client_capabilities=None)
+# La respuesta de una persona que dice que sí.
+SI: Any = AcceptedElicitation(data=ConfirmForm(confirmar=True))
 
 
 def _col(id_: str, name: str, category: str | None = None) -> dict[str, object]:
@@ -122,15 +133,17 @@ class ColumnToolsTests(IsolatedAsyncioTestCase):
         ]
         cliente = self._cliente(columnas)
         with patch("foundry_mcp.server._prepare", return_value=cliente):
+            # Lo que se va a borrar se lee antes de preguntar (resolver): ahí se explica el fallo.
             with self.assertRaises(FoundryError) as caso:
-                await server.delete_column(None, "ini", "En curso")
+                await server._borrado_columna("ini", "En curso", "", NO_PREGUNTA)
             mensaje = str(caso.exception)
             self.assertIn("1 tarjeta", mensaje)  # dice CUÁNTAS hay que reubicar
             self.assertIn("Ideas", mensaje)  # y a dónde podrían ir
             cliente.delete_column.assert_not_awaited()  # no se llegó a borrar nada
 
             # Con destino sí procede, y cuenta qué se movió.
-            resultado = await server.delete_column(None, "ini", "En curso", "Ideas")
+            borrado = await server._borrado_columna("ini", "En curso", "Ideas", NO_PREGUNTA)
+            resultado = await server.delete_column(NO_PREGUNTA, "ini", "En curso", borrado, SI, "Ideas")
             cliente.delete_column.assert_awaited_once_with("ini", "c2", "c1")
             self.assertEqual((resultado["deleted"], resultado["moved_tasks"]), ("En curso", 1))
             self.assertEqual(resultado["moved_to"], "Ideas")
@@ -143,7 +156,7 @@ class ColumnToolsTests(IsolatedAsyncioTestCase):
         cliente = self._cliente(columnas)
         with patch("foundry_mcp.server._prepare", return_value=cliente):
             with self.assertRaises(FoundryError):
-                await server.delete_column(None, "ini", "Ideas", "Ideas")
+                await server._borrado_columna("ini", "Ideas", "Ideas", NO_PREGUNTA)
             cliente.delete_column.assert_not_awaited()
 
     async def test_reordering_demands_every_column_and_names_the_missing_ones(self) -> None:
@@ -185,26 +198,23 @@ class ToolAnnotationsTests(IsolatedAsyncioTestCase):
         for t in await server.mcp.list_tools():
             with self.subTest(tool=t.name):
                 if t.name.startswith(("list_", "get_", "read_", "search_")) or t.name == "whoami":
-                    self.assertIs(t.annotations.readOnlyHint, True)
+                    self.assertIs(t.annotations.read_only_hint, True)
                 elif t.name.startswith(("delete_", "unlink_")):
-                    self.assertIs(t.annotations.destructiveHint, True)
+                    self.assertIs(t.annotations.destructive_hint, True)
                 else:
                     # Crear o actualizar NO destruye: decirlo es lo que evita que el cliente lo
                     # trate como un borrado (lo no declarado se asume destructivo).
-                    self.assertIs(t.annotations.readOnlyHint, False)
-                    self.assertIs(t.annotations.destructiveHint, False)
+                    self.assertIs(t.annotations.read_only_hint, False)
+                    self.assertIs(t.annotations.destructive_hint, False)
 
 
 class ConfirmBeforeDeletingTests(IsolatedAsyncioTestCase):
-    """FNV-269: lo irreversible se pregunta con el dato delante, sin bloquear a quien no puede."""
+    """FNV-269: lo irreversible se pregunta con el dato delante, sin bloquear a quien no puede.
 
-    def _ctx(self, action: str, confirmar: bool = True) -> SimpleNamespace:
-        elicit = AsyncMock(
-            return_value=SimpleNamespace(
-                action=action, data=SimpleNamespace(confirmar=confirmar)
-            )
-        )
-        return SimpleNamespace(elicit=elicit)
+    Desde FNV-310 la pregunta la hace un resolver antes del cuerpo (el SDK la manda por el canal de
+    cada protocolo), así que se prueban por separado: qué se pregunta y qué hace el cuerpo con la
+    respuesta. El recorrido entero por stdio, en los dos protocolos, va en la verificación.
+    """
 
     def _tablero(self) -> dict[str, object]:
         tarjeta = {
@@ -216,26 +226,39 @@ class ConfirmBeforeDeletingTests(IsolatedAsyncioTestCase):
         }
         return {"board": {"columns": [{"id": "c1", "name": "Ideas", "tasks": [tarjeta]}]}}
 
+    async def _pregunta_tarjeta(self, cliente: AsyncMock) -> tuple[Any, str]:
+        with patch("foundry_mcp.server._prepare", return_value=cliente):
+            borrado = await server._borrado_tarjeta("ini", "t1", PREGUNTA)
+            pregunta = await server._confirma_tarjeta(borrado, PREGUNTA)
+        assert isinstance(pregunta, Elicit)
+        return borrado, pregunta.message
+
     async def test_it_says_what_is_lost_and_deletes_when_accepted(self) -> None:
         cliente = AsyncMock()
         cliente.get_initiative.return_value = self._tablero()
-        ctx = self._ctx("accept")
-        with patch("foundry_mcp.server._prepare", return_value=cliente):
-            resultado = await server.delete_task(ctx, "ini", "t1")
-        pregunta = ctx.elicit.await_args.kwargs["message"]
+        borrado, pregunta = await self._pregunta_tarjeta(cliente)
         self.assertIn("La tarjeta vieja", pregunta)
         self.assertIn("12 comentarios", pregunta)  # el dato delante, no un «¿seguro?»
         self.assertIn("3 adjuntos", pregunta)
+        with patch("foundry_mcp.server._prepare", return_value=cliente):
+            resultado = await server.delete_task(PREGUNTA, "ini", "t1", borrado, SI)
         cliente.delete_task.assert_awaited_once_with("ini", "t1")
         self.assertEqual(resultado["status"], "deleted")
+        self.assertEqual(resultado["era"], "La tarjeta vieja")
 
     async def test_cancelling_stops_everything(self) -> None:
         cliente = AsyncMock()
         cliente.get_initiative.return_value = self._tablero()
+        borrado, _ = await self._pregunta_tarjeta(cliente)
+        respuestas: tuple[Any, ...] = (
+            CancelledElicitation(),
+            DeclinedElicitation(),
+            AcceptedElicitation(data=ConfirmForm(confirmar=False)),
+        )
         with patch("foundry_mcp.server._prepare", return_value=cliente):
-            for ctx in (self._ctx("cancel"), self._ctx("accept", confirmar=False)):
-                with self.assertRaises(FoundryError):
-                    await server.delete_task(ctx, "ini", "t1")
+            for respuesta in respuestas:
+                with self.subTest(respuesta=respuesta.action), self.assertRaises(FoundryError):
+                    await server.delete_task(PREGUNTA, "ini", "t1", borrado, respuesta)
         cliente.delete_task.assert_not_awaited()
 
     async def test_a_note_is_named_by_its_title_not_its_uuid(self) -> None:
@@ -245,26 +268,27 @@ class ConfirmBeforeDeletingTests(IsolatedAsyncioTestCase):
             "blocks": [],
         }
         cliente.document_backlinks.return_value = [{"id": "n2"}]
-        ctx = self._ctx("accept")
         with patch("foundry_mcp.server._prepare", return_value=cliente):
-            await server.delete_note(ctx, "n1")
-        pregunta = ctx.elicit.await_args.kwargs["message"]
-        self.assertIn("Acta del lunes", pregunta)
-        self.assertNotIn("n1", pregunta)  # nadie reconoce una nota por su uuid
-        self.assertIn("enlazada desde 1 nota", pregunta)
+            borrado = await server._borrado_nota("n1", PREGUNTA)
+            pregunta = await server._confirma_nota(borrado, PREGUNTA)
+            respuesta = await server.delete_note(PREGUNTA, "n1", borrado, SI)
+        assert isinstance(pregunta, Elicit)
+        self.assertIn("Acta del lunes", pregunta.message)
+        self.assertNotIn("n1", pregunta.message)  # nadie reconoce una nota por su uuid
+        self.assertIn("enlazada desde 1 nota", pregunta.message)
+        self.assertEqual(respuesta, "Nota «Acta del lunes» borrada.")
 
     async def test_the_question_agrees_with_what_is_being_deleted(self) -> None:
         """«La tarjeta … ¿Lo borro?» delataba la plantilla; el artículo manda."""
         cliente = AsyncMock()
         cliente.get_initiative.return_value = self._tablero()
-        ctx = self._ctx("accept")
-        with patch("foundry_mcp.server._prepare", return_value=cliente):
-            await server.delete_task(ctx, "ini", "t1")
-        self.assertTrue(ctx.elicit.await_args.kwargs["message"].endswith("¿La borro?"))
+        _, pregunta = await self._pregunta_tarjeta(cliente)
+        self.assertTrue(pregunta.endswith("¿La borro?"))
 
-        masculino = self._ctx("accept")
-        await server._confirmar_borrado(masculino, "El adjunto «acta.md» (94 B) de esta tarjeta.")
-        self.assertTrue(masculino.elicit.await_args.kwargs["message"].endswith("¿Lo borro?"))
+        adjunto = _Borrado("El adjunto «acta.md» (94 B) de esta tarjeta.", {})
+        masculino = server._preguntar_borrado(adjunto, PREGUNTA)
+        assert isinstance(masculino, Elicit)
+        self.assertTrue(masculino.message.endswith("¿Lo borro?"))
 
     async def test_the_list_of_losses_reads_like_a_sentence(self) -> None:
         """Enumerar con comas y una «y» final; no «a y b y c»."""
@@ -272,19 +296,17 @@ class ConfirmBeforeDeletingTests(IsolatedAsyncioTestCase):
         tablero["board"]["columns"][0]["tasks"][0]["tests_total"] = 2  # type: ignore[index]
         cliente = AsyncMock()
         cliente.get_initiative.return_value = tablero
-        ctx = self._ctx("accept")
-        with patch("foundry_mcp.server._prepare", return_value=cliente):
-            await server.delete_task(ctx, "ini", "t1")
-        pregunta = ctx.elicit.await_args.kwargs["message"]
+        _, pregunta = await self._pregunta_tarjeta(cliente)
         self.assertIn("con 12 comentarios, 3 adjuntos y 2 casos de prueba.", pregunta)
 
     async def test_a_client_that_cannot_ask_does_not_block_the_work(self) -> None:
+        """Por el SDK de verdad (resolvers incluidos), sin nadie a quien preguntar."""
         cliente = AsyncMock()
         cliente.get_initiative.return_value = self._tablero()
-        ctx = SimpleNamespace(elicit=AsyncMock(side_effect=RuntimeError("sin elicitation")))
         with patch("foundry_mcp.server._prepare", return_value=cliente):
-            await server.delete_task(ctx, "ini", "t1")
-        cliente.delete_task.assert_awaited_once()
+            resultado = await server.mcp.call_tool("delete_task", {"initiative_id": "ini", "task_id": "t1"})
+        self.assertFalse(resultado.is_error)
+        cliente.delete_task.assert_awaited_once_with("ini", "t1")
 
 
 class PromptTests(IsolatedAsyncioTestCase):
@@ -363,14 +385,11 @@ class DeleteColumnWordingTests(IsolatedAsyncioTestCase):
         ]
         cliente = AsyncMock()
         cliente.get_initiative.return_value = {"board": {"columns": columnas}}
-        ctx = SimpleNamespace(
-            elicit=AsyncMock(
-                return_value=SimpleNamespace(action="accept", data=SimpleNamespace(confirmar=True))
-            )
-        )
         with patch("foundry_mcp.server._prepare", return_value=cliente):
-            await server.delete_column(ctx, "ini", "En curso", "Ideas")
-        return str(ctx.elicit.await_args.kwargs["message"])
+            borrado = await server._borrado_columna("ini", "En curso", "Ideas", PREGUNTA)
+            pregunta = await server._confirma_columna(borrado, PREGUNTA)
+        assert isinstance(pregunta, Elicit)
+        return pregunta.message
 
     async def test_one_card_reads_as_singular(self) -> None:
         pregunta = await self._pregunta(1)

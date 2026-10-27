@@ -42,11 +42,15 @@ class Config:
     agent_source: str
     # MCP no estandariza el modelo; se declara aquí o por llamada de herramienta.
     agent_model: str
+    # Grupos de herramientas que se exponen (FOUNDRY_TOOLSETS); vacío = todos (FNV-313).
+    toolsets: tuple[str, ...] = ()
 
 
 def load_config() -> Config:
-    # Algunos clientes ya exponen el modelo en su entorno; FOUNDRY_AGENT_MODEL manda cuando se
-    # necesita corregirlo. El override por llamada de herramienta sigue teniendo mayor prioridad.
+    # Ningún cliente exporta hoy su modelo a los servidores MCP (comprobado en Claude Code, Codex
+    # 0.160 y OpenCode 1.18, FNV-311): estas variables solo tienen valor si alguien las pone a mano.
+    # FOUNDRY_AGENT_MODEL es la propia; las demás se aceptan como sinónimos por compatibilidad. Lo
+    # que el agente declare (por llamada o en `whoami`) manda sobre todas ellas.
     detected_model = next(
         (
             value
@@ -70,4 +74,7 @@ def load_config() -> Config:
         env_password=os.getenv("FOUNDRY_PASSWORD", ""),
         agent_source=os.getenv("FOUNDRY_AGENT_SOURCE", "auto").strip() or "auto",
         agent_model=detected_model,
+        toolsets=tuple(
+            name for raw in os.getenv("FOUNDRY_TOOLSETS", "").split(",") if (name := raw.strip().lower())
+        ),
     )
