@@ -80,6 +80,8 @@ class LoginResolverTests(TestCase):
         with patch.dict(os.environ, SIN_CREDENCIALES), self.assertRaises(FoundryError) as err:
             server._pedir_credenciales(NO_PREGUNTA)
         self.assertIn("FOUNDRY_TOKEN", str(err.exception))
+        # La salida sin contraseña en la configuración: entrar desde otro cliente y recordar (OpenCode).
+        self.assertIn("«recordar»", str(err.exception))
 
 
 class ReauthOn2026Tests(IsolatedAsyncioTestCase):

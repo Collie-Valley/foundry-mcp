@@ -291,6 +291,16 @@ _LOGIN_CANCELADO = (
     "entra una vez desde un cliente interactivo marcando «recordar»."
 )
 
+# Lo que se dice a un cliente que no sabe abrir el diálogo (no declara elicitation; OpenCode 1.18,
+# por ejemplo). El token recordado vive en el gestor de credenciales del sistema y lo usan todos los
+# clientes de la máquina, así que entrar una vez desde otro basta; las variables, para automatizar.
+_SIN_DIALOGO = (
+    "Este cliente no sabe abrir el diálogo de inicio de sesión. Entra una vez desde un cliente que "
+    "sí lo abra (Claude Code o Codex) marcando «recordar»: el token queda en el gestor de "
+    "credenciales del sistema y este cliente lo usará. Para automatizar, define FOUNDRY_TOKEN, o "
+    "FOUNDRY_EMAIL y FOUNDRY_PASSWORD."
+)
+
 
 async def _token_desde(form: LoginForm) -> str:
     """Del formulario de login a un token: el pegado tal cual, o el que da email + contraseña."""
@@ -334,10 +344,7 @@ async def _reauth(ctx: Ctx) -> str:
             schema=LoginForm,
         )
     except Exception as e:  # cliente MCP sin soporte de elicitation
-        raise FoundryError(
-            "Este cliente no puede pedir credenciales de forma interactiva. Define FOUNDRY_TOKEN "
-            "o FOUNDRY_EMAIL/FOUNDRY_PASSWORD como variables de entorno."
-        ) from e
+        raise FoundryError(_SIN_DIALOGO) from e
     if result.action != "accept" or result.data is None:
         raise FoundryError(_LOGIN_CANCELADO)
     return await _token_desde(result.data)
@@ -648,10 +655,7 @@ def _pedir_credenciales(ctx: Ctx) -> Elicit[LoginForm] | LoginForm:
     if cfg.env_email and cfg.env_password:
         return LoginForm(email=cfg.env_email, password=cfg.env_password)
     if not _puede_preguntar(ctx):
-        raise FoundryError(
-            "Este cliente no puede pedir credenciales de forma interactiva. Define FOUNDRY_TOKEN "
-            "o FOUNDRY_EMAIL/FOUNDRY_PASSWORD como variables de entorno."
-        )
+        raise FoundryError(_SIN_DIALOGO)
     pregunta = f"Inicia sesión en Foundry ({cfg.api_base}): email + contraseña, o pega un token."
     return Elicit(pregunta, LoginForm)
 

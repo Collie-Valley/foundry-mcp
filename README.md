@@ -73,7 +73,8 @@ default_tools_approval_mode = "writes"
 FOUNDRY_TOOLSETS = "tableros,qa"
 ```
 
-- **No pongas la contraseña en este fichero.** Codex sabe abrir el diálogo de inicio de sesión.
+- **No pongas la contraseña en este fichero.** Codex abre el diálogo de inicio de sesión (desde la
+  0.2.1; antes lo cancelaba sin enseñarlo).
   Para automatizar sin diálogo, define `FOUNDRY_TOKEN` en tu entorno y reenvíala con
   `env_vars = ["FOUNDRY_TOKEN"]`, sin escribir su valor.
 - En una ejecución sin interfaz (`codex exec`), las herramientas que escriben fallan con *«MCP tool
@@ -116,9 +117,14 @@ servidores bajo `mcp.servers`, `"disabled": true` para apagarlos y variables cit
 }
 ```
 
-Para comprobarlo, pídele al agente *«usa whoami de foundry-boards y declara tu modelo»*. La primera
-vez se abre un diálogo para entrar con tu correo y tu contraseña; si marcas **«recordar»**, no te lo
-vuelve a pedir hasta que caduque la sesión (ver [Autenticación](#autenticación)).
+Para comprobarlo, pídele al agente *«usa whoami de foundry-boards y declara tu modelo»*. En Claude
+Code y Codex, la primera vez se abre un diálogo para entrar con tu correo y tu contraseña; si marcas
+**«recordar»**, no te lo vuelve a pedir hasta que caduque la sesión (ver [Autenticación](#autenticación)).
+
+**OpenCode no abre ese diálogo**: la 1.18 no soporta *elicitation*. Entra una vez desde Claude Code o
+Codex marcando «recordar»: el token queda en el gestor de credenciales del sistema y OpenCode lo usa
+sin pedir nada, tampoco la contraseña. Si no tienes otro cliente, usa `FOUNDRY_TOKEN` como en el
+bloque de arriba.
 
 No hay que configurar ningún backend: por omisión habla con el Foundry público. Sin versión, `uvx`
 usa la última que tenga en caché; para fijar una, usa `foundry-boards-mcp@<versión>` en el comando.
@@ -192,8 +198,10 @@ token.
   ventanas abiertas, solo la primera pide entrar.
 - `login` cambia de cuenta; `logout` olvida el token, en memoria y en el sistema.
 
-El diálogo usa *elicitation* de MCP. Si tu cliente no la soporta, usa `FOUNDRY_TOKEN` o
-`FOUNDRY_EMAIL` + `FOUNDRY_PASSWORD` (ver [Configuración](#configuración)).
+El diálogo usa *elicitation* de MCP. Si tu cliente no la soporta (OpenCode 1.18), entra una vez
+desde otro que sí (Claude Code o Codex) marcando «recordar»: el token recordado lo usan todos los
+clientes de la máquina. Para automatizar, `FOUNDRY_TOKEN` o `FOUNDRY_EMAIL` + `FOUNDRY_PASSWORD`
+(ver [Configuración](#configuración)).
 
 **Protocolo.** El servidor habla la revisión **2026-07-28** de MCP (sin `initialize` ni sesión de
 protocolo) y también las anteriores, con las que conectan hoy Claude Code, Codex y OpenCode. En
@@ -339,7 +347,7 @@ Si te hace falta algo, [abre una incidencia](https://github.com/Collie-Valley/fo
 |---|---|
 | El servidor no arranca | `uv` no está en el PATH de tu cliente. Comprueba `uvx --version` en una terminal y reinicia el cliente. |
 | Pide entrar cada vez | No marcaste «recordar»: la sesión se queda solo en memoria. |
-| *«Este cliente no puede pedir credenciales…»* | Tu cliente no soporta *elicitation*: usa `FOUNDRY_TOKEN` o `FOUNDRY_EMAIL` + `FOUNDRY_PASSWORD`. |
+| *«Este cliente no sabe abrir el diálogo…»* | Tu cliente no soporta *elicitation* (OpenCode 1.18). Entra una vez desde Claude Code o Codex marcando «recordar», o usa `FOUNDRY_TOKEN`. |
 | 403 al cambiar algo | La cuenta es observadora o no es miembro de esa Área. |
 | 404 en un tablero o una tarjeta | El id no es correcto, o la cuenta no ve ese tablero. |
 | Las tools nuevas no aparecen | Los clientes leen la lista de tools al arrancar: reinícialo. |
