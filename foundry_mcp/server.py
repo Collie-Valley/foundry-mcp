@@ -104,7 +104,9 @@ mcp = FastMCP(
         "jerarquía (épica → historia/tarea/bug/incidencia → subtarea; una historia agrupa "
         "tareas y bugs), etiquetas, vínculos, sprints (Scrum) y leer el "
         "historial estructurado. Ubica ids con `list_spaces`/`list_boards`; `get_board` trae "
-        "columnas y tarjetas. La autenticación es interactiva: si no hay sesión, la primera acción "
+        "columnas y tarjetas en resumen (sin las de cierre salvo que las pidas), `get_task` lee una "
+        "tarjeta entera por su clave («FNV-308») y `search_tasks` busca. "
+        "La autenticación es interactiva: si no hay sesión, la primera acción "
         "abrirá un diálogo de inicio de sesión (o usa `login`). "
         f"Cada tablero tiene SUS columnas ({COLUMN_SETS_HINT}): míralas con `get_board` en vez de "
         "suponerlas, y fíjate en la `category` de cada una (`todo`/`in_progress`/`done`), que es lo "
@@ -611,21 +613,185 @@ async def list_all_boards(ctx: Ctx) -> dict[str, Any]:
     return {"personal": personal, "spaces": out_spaces}
 
 
+# ── lectura del tablero sin desbordar el contexto (FNV-312) ──────────────────
+# La API devuelve el tablero entero —en el FNV, 590 000 caracteres, el 80 % de la columna Hecho y la
+# mayoría descripciones— y no tiene una ruta para una sola tarjeta. Se filtra aquí: la red sigue
+# bajando todo, pero al contexto del agente solo llega lo que pidió, que es lo caro.
+DETAILS = ("resumen", "completo")
+# Lo que hace falta para decidir qué tocar: qué es, de quién cuelga, qué la frena y qué espera a una
+# persona. Sin descripción ni procedencia: eso se lee con `get_task` cuando toca.
+_CARD_SUMMARY_FIELDS = (
+    "id", "title", "issue_type", "priority", "parent_id", "assignee_id", "labels", "status_agent",
+    "flagged", "gate_pending", "tests_total", "tests_passed", "comment_count", "sprint_id",
+    "story_points", "due_date",
+)  # fmt: skip
+
+
+def _card_key(board_key: str | None, task: dict[str, Any]) -> str | None:
+    """«FNV-308»: como nombra la gente una tarjeta. La API solo trae el número (`seq`)."""
+    seq = task.get("seq")
+    return f"{board_key}-{seq}" if board_key and seq is not None else None
+
+
+def _label_names(task: dict[str, Any]) -> list[str]:
+    return [str(lbl.get("name")) for lbl in task.get("labels") or [] if isinstance(lbl, dict)]
+
+
+def _card_summary(board_key: str | None, task: dict[str, Any]) -> dict[str, Any]:
+    """La tarjeta en una línea: los campos vacíos, a cero o en falso no se mandan."""
+    out: dict[str, Any] = {"key": _card_key(board_key, task)}
+    for field in _CARD_SUMMARY_FIELDS:
+        value = _label_names(task) if field == "labels" else task.get(field)
+        if value not in (None, "", [], 0, False):
+            out[field] = value
+    return out
+
+
+def _all_tasks(detail: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """(columna, tarjeta) de todo el tablero, en el orden en que se ve."""
+    return [(col, task) for col in _columns_of(detail) for task in col.get("tasks") or []]
+
+
+def _locate_task(detail: dict[str, Any], task: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Una tarjeta por id, por clave («FNV-308», sin distinguir mayúsculas) o por su número («308»)."""
+    wanted = task.strip()
+    number = wanted.rsplit("-", 1)[-1].lstrip("#")
+    prefix = wanted.rsplit("-", 1)[0].upper() if "-" in wanted else ""
+    board_key = str(detail.get("key") or "").upper()
+    for col, item in _all_tasks(detail):
+        if str(item.get("id")) == wanted:
+            return col, item
+    if number.isdigit() and prefix in ("", board_key):
+        for col, item in _all_tasks(detail):
+            if str(item.get("seq")) == number:
+                return col, item
+    raise FoundryError(
+        f"No hay ninguna tarjeta «{task}» en este tablero ({detail.get('title')}, clave "
+        f"{detail.get('key')}). Búscala con `search_tasks`."
+    )
+
+
 @mcp.tool(annotations=SOLO_LEE)
-async def get_board(ctx: Ctx, initiative_id: str) -> dict[str, Any]:
-    """Trae un tablero completo: la ficha de la iniciativa + columnas, cada una con sus tarjetas.
+async def get_board(
+    ctx: Ctx,
+    initiative_id: str,
+    categories: list[str] | None = None,
+    detail: str = "resumen",
+    limit_per_column: int | None = None,
+) -> dict[str, Any]:
+    """Trae un tablero: la ficha de la iniciativa + sus columnas con sus tarjetas.
 
     Cada columna: id, name, order, `category` y `color`. **La categoría es lo que hay que mirar**
     (`todo` = por donde entra el trabajo · `in_progress` = en curso · `done` = cierra la tarjeta):
     es lo único estable de una columna, porque el nombre lo pone el equipo y lo cambia cuando
-    quiere. El `color` es apariencia; puede ser el propio de la columna o venir vacío, y entonces
-    la pantalla usa el de su categoría. Ningún tablero comparte nomenclatura con otro.
+    quiere. El `color` es apariencia; si viene vacío, la pantalla usa el de su categoría.
 
-    Cada tarjeta: id, title, description, priority, kind, origin, status_agent, assignee_id, order,
-    comment_count (nº de notas de historial). `status_agent="proposed"` marca tarjetas propuestas
-    por IA o proyectadas de una nota. Usa `get_task_comments` para leer el historial de una tarjeta.
+    Para que quepa en el contexto, **por defecto**:
+    - solo trae tarjetas de las columnas `todo` e `in_progress`; las de `done` llegan plegadas
+      (`task_count` y `tasks_omitted`). Pide otras con `categories` (p. ej. `["done"]`).
+    - `detail="resumen"`: cada tarjeta sin descripción (key, title, issue_type, priority, labels,
+      parent_id, assignee_id, flagged, gate_pending, tests_total/tests_passed, comment_count…; lo
+      vacío, a cero o en falso se omite). `detail="completo"` trae todos los campos.
+    - `limit_per_column`: tope de tarjetas por columna (las primeras en el orden del tablero).
+
+    `key` es la clave con la que la nombra la gente («FNV-308»). Para leer UNA tarjeta entera usa
+    `get_task`; para buscar, `search_tasks`; su historial, `get_task_comments`.
+    `status_agent="proposed"` marca tarjetas propuestas por IA o proyectadas de una nota.
     """
-    return await _prepare(ctx).get_initiative(initiative_id)
+    wanted = tuple(categories) if categories else ("todo", "in_progress")
+    bad = [c for c in wanted if c not in COLUMN_CATEGORIES]
+    if bad:
+        raise FoundryError(f"categories no válidas: {bad}. Usa {', '.join(COLUMN_CATEGORIES)}.")
+    if detail not in DETAILS:
+        raise FoundryError(f"detail debe ser {' o '.join(DETAILS)}.")
+    data = await _prepare(ctx).get_initiative(initiative_id)
+    board_key = data.get("key")
+    for col in _columns_of(data):
+        tasks = col.get("tasks") or []
+        shown = tasks if col.get("category") in wanted else []
+        if limit_per_column is not None:
+            shown = shown[: max(limit_per_column, 0)]
+        col["task_count"] = len(tasks)
+        if len(shown) < len(tasks):
+            col["tasks_omitted"] = len(tasks) - len(shown)
+        if detail == "resumen":
+            col["tasks"] = [_card_summary(board_key, t) for t in shown]
+        else:
+            col["tasks"] = [{"key": _card_key(board_key, t), **t} for t in shown]
+    return data
+
+
+@mcp.tool(annotations=SOLO_LEE)
+async def get_task(ctx: Ctx, initiative_id: str, task: str) -> dict[str, Any]:
+    """Lee UNA tarjeta entera —descripción incluida— por su id o por su clave («FNV-308» o «308»).
+
+    Devuelve todos sus campos más `key` y `column` (id, name y `category` de donde está). Es la
+    forma de leer una tarjeta sin traer el tablero entero. Su historial va aparte:
+    `get_task_comments`; criterios: `list_criteria`; casos de prueba: `list_test_cases`.
+    """
+    data = await _prepare(ctx).get_initiative(initiative_id)
+    col, item = _locate_task(data, task)
+    column = {"id": col.get("id"), "name": col.get("name"), "category": col.get("category")}
+    return {"key": _card_key(data.get("key"), item), **item, "column": column}
+
+
+@mcp.tool(annotations=SOLO_LEE)
+async def search_tasks(
+    ctx: Ctx,
+    initiative_id: str,
+    text: str = "",
+    labels: list[str] | None = None,
+    column: str = "",
+    issue_type: str = "",
+    include_done: bool = False,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """Busca tarjetas de un tablero y devuelve una línea por cada una.
+
+    - `text`: aparece en el título, la descripción o la clave (sin distinguir acentos ni mayúsculas).
+    - `labels`: tiene TODAS estas etiquetas. `issue_type`: epic|historia|tarea|bug|incidencia|subtarea.
+    - `column`: solo esa columna (por nombre o id). Sin ella, se buscan las columnas `todo` e
+      `in_progress`; `include_done=True` añade las de cierre.
+    - `limit`: máximo de resultados (25 por omisión). `total` dice cuántas coincidían en total.
+
+    Cada resultado: id, key, title, column, category, issue_type, priority y labels. Ábrela con
+    `get_task`.
+    """
+    if issue_type and issue_type not in ISSUE_TYPES:
+        raise FoundryError(f"issue_type no válido: {issue_type}. Usa {', '.join(ISSUE_TYPES)}.")
+    data = await _prepare(ctx).get_initiative(initiative_id)
+    board_key = data.get("key")
+    only_column = _resolve_column(_columns_of(data), column) if column else None
+    needle = _norm(text)
+    wanted_labels = {_norm(lbl) for lbl in labels or []}
+    found: list[dict[str, Any]] = []
+    for col, item in _all_tasks(data):
+        if only_column is not None:
+            if str(col.get("id")) != only_column:
+                continue
+        elif col.get("category") == "done" and not include_done:
+            continue
+        key = _card_key(board_key, item) or ""
+        haystack = _norm(f"{key} {item.get('title') or ''} {item.get('description') or ''}")
+        if needle and needle not in haystack:
+            continue
+        if wanted_labels and not wanted_labels <= {_norm(n) for n in _label_names(item)}:
+            continue
+        if issue_type and item.get("issue_type") != issue_type:
+            continue
+        found.append(
+            {
+                "id": item.get("id"),
+                "key": key or None,
+                "title": item.get("title"),
+                "column": col.get("name"),
+                "category": col.get("category"),
+                "issue_type": item.get("issue_type"),
+                "priority": item.get("priority"),
+                "labels": _label_names(item),
+            }
+        )
+    return {"total": len(found), "tasks": found[: max(limit, 0)]}
 
 
 # ── tools: tableros ──────────────────────────────────────────────────────────
@@ -2195,7 +2361,7 @@ def trabajar_tarjeta(initiative_id: str, task_id: str) -> str:
 
 0. **Di con qué modelo trabajas.** Llama a `whoami` con `agent_model` (tu modelo exacto): queda
    en todo lo que hagas en la sesión, y así cada aporte dice qué IA lo hizo.
-1. **Entérate antes de tocar nada.** Lee la tarjeta con `get_board`, su historial con
+1. **Entérate antes de tocar nada.** Lee la tarjeta con `get_task`, su historial con
    `get_task_comments`, sus criterios con `list_criteria` y sus casos de prueba con
    `list_test_cases`. Lo que ya se decidió no se vuelve a decidir.
 2. **Haz visible el plan.** Mueve la tarjeta a la columna de trabajo en curso con

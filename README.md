@@ -153,10 +153,12 @@ borran (tarjeta, nota, adjunto, columna) además preguntan antes y dicen qué se
 | Herramienta | Qué hace |
 |---|---|
 | `login` · `logout` | Entra (abre el diálogo) o cambia de cuenta · olvida el token. |
-| `whoami` | La cuenta con la que actúa el MCP. |
+| `whoami` | La cuenta con la que actúa el MCP, y donde el agente declara su modelo. |
 | `list_spaces` | Las Áreas de trabajo que ves. |
 | `list_boards` · `list_all_boards` | Tableros personales o de un Área · todos a la vez. |
-| `get_board` | Un tablero entero: sus columnas, cada una con sus tarjetas. |
+| `get_board` | Un tablero: sus columnas con sus tarjetas, en resumen y sin las de cierre salvo que las pidas (`categories`, `detail`, `limit_per_column`). |
+| `get_task` | Una tarjeta entera, descripción incluida, por su id o su clave (`FNV-308`). |
+| `search_tasks` | Buscar tarjetas por texto, etiquetas, columna o tipo. |
 
 **Tableros y columnas**
 
