@@ -11,8 +11,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      # setup-uv va con la versión completa a propósito: desde la v8 no publica etiquetas mayores
+      # (`@v10` no existe), para que nadie dependa de una etiqueta que se pueda mover por debajo.
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.13"
       - run: uvx ruff check .
@@ -25,8 +27,8 @@ jobs:
       matrix:
         python-version: ["3.10", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync          # incluye el grupo dev (pytest), declarado en pyproject.toml
@@ -37,8 +39,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.13"
       - run: uv build

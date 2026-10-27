@@ -22,8 +22,9 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      # Versión completa, no `@v10`: setup-uv no publica etiquetas mayores (ver ci.yml).
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.13"
 
