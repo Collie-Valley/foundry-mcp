@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import mimetypes
+import sys
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -113,7 +114,9 @@ mcp = FastMCP(
         "único estable — el nombre lo cambia quien quiera. Al crear una tarjeta sin `column`, nace "
         "en la columna de entrada del tablero. Declara tu modelo una vez, al empezar, con "
         "`whoami(agent_model=...)`: el servidor lo recuerda y lo pone en todo lo que hagas en la "
-        "sesión, sin firmar los textos. El backend valida permisos por rol."
+        "sesión. Todo lo que escribes queda marcado como de IA (procedencia `ia`): no firmes los "
+        "textos. Lo que escribe exige rol colaborador o dueño: el backend valida permisos por rol. "
+        "Los gates humanos (`review_*`) son decisión de una persona: úsalos solo si te lo piden."
     ),
 )
 # FastMCP 1.x no deja pasar la versión y, sin ella, el servidor se anuncia con la del SDK (`mcp`
@@ -679,24 +682,16 @@ async def get_board(
     detail: str = "resumen",
     limit_per_column: int | None = None,
 ) -> dict[str, Any]:
-    """Trae un tablero: la ficha de la iniciativa + sus columnas con sus tarjetas.
+    """Trae un tablero: la ficha de la iniciativa y sus columnas con sus tarjetas.
 
-    Cada columna: id, name, order, `category` y `color`. **La categoría es lo que hay que mirar**
-    (`todo` = por donde entra el trabajo · `in_progress` = en curso · `done` = cierra la tarjeta):
-    es lo único estable de una columna, porque el nombre lo pone el equipo y lo cambia cuando
-    quiere. El `color` es apariencia; si viene vacío, la pantalla usa el de su categoría.
+    Columna: id, name, order, `category` y `color`. **Mira la categoría**, no el nombre (que cambia):
+    `todo` = por donde entra el trabajo · `in_progress` = en curso · `done` = cierra la tarjeta.
 
-    Para que quepa en el contexto, **por defecto**:
-    - solo trae tarjetas de las columnas `todo` e `in_progress`; las de `done` llegan plegadas
-      (`task_count` y `tasks_omitted`). Pide otras con `categories` (p. ej. `["done"]`).
-    - `detail="resumen"`: cada tarjeta sin descripción (key, title, issue_type, priority, labels,
-      parent_id, assignee_id, flagged, gate_pending, tests_total/tests_passed, comment_count…; lo
-      vacío, a cero o en falso se omite). `detail="completo"` trae todos los campos.
-    - `limit_per_column`: tope de tarjetas por columna (las primeras en el orden del tablero).
-
-    `key` es la clave con la que la nombra la gente («FNV-308»). Para leer UNA tarjeta entera usa
-    `get_task`; para buscar, `search_tasks`; su historial, `get_task_comments`.
-    `status_agent="proposed"` marca tarjetas propuestas por IA o proyectadas de una nota.
+    Por defecto, para que quepa: tarjetas de `todo` e `in_progress` (las de `done` llegan plegadas,
+    con `task_count`/`tasks_omitted`; pídelas con `categories`) y en resumen, sin descripción ni
+    campos vacíos (`detail="completo"` trae todo). `limit_per_column` pone tope por columna.
+    `key` es la clave de la tarjeta («FNV-308»): ábrela con `get_task`; busca con `search_tasks`.
+    `status_agent="proposed"`: propuesta por IA o salida de una nota.
     """
     wanted = tuple(categories) if categories else ("todo", "in_progress")
     bad = [c for c in wanted if c not in COLUMN_CATEGORIES]
@@ -723,11 +718,9 @@ async def get_board(
 
 @mcp.tool(annotations=SOLO_LEE)
 async def get_task(ctx: Ctx, initiative_id: str, task: str) -> dict[str, Any]:
-    """Lee UNA tarjeta entera —descripción incluida— por su id o por su clave («FNV-308» o «308»).
-
-    Devuelve todos sus campos más `key` y `column` (id, name y `category` de donde está). Es la
-    forma de leer una tarjeta sin traer el tablero entero. Su historial va aparte:
-    `get_task_comments`; criterios: `list_criteria`; casos de prueba: `list_test_cases`.
+    """Lee UNA tarjeta entera, con descripción, por id o por clave («FNV-308», «308»). Trae `key` y
+    `column` (id, name, category). Su hilo: `get_task_comments`; criterios: `list_criteria`; casos de
+    prueba: `list_test_cases`.
     """
     data = await _prepare(ctx).get_initiative(initiative_id)
     col, item = _locate_task(data, task)
@@ -746,16 +739,13 @@ async def search_tasks(
     include_done: bool = False,
     limit: int = 25,
 ) -> dict[str, Any]:
-    """Busca tarjetas de un tablero y devuelve una línea por cada una.
+    """Busca tarjetas de un tablero; una línea por tarjeta (id, key, title, column, category,
+    issue_type, priority, labels).
 
-    - `text`: aparece en el título, la descripción o la clave (sin distinguir acentos ni mayúsculas).
-    - `labels`: tiene TODAS estas etiquetas. `issue_type`: epic|historia|tarea|bug|incidencia|subtarea.
-    - `column`: solo esa columna (por nombre o id). Sin ella, se buscan las columnas `todo` e
-      `in_progress`; `include_done=True` añade las de cierre.
-    - `limit`: máximo de resultados (25 por omisión). `total` dice cuántas coincidían en total.
-
-    Cada resultado: id, key, title, column, category, issue_type, priority y labels. Ábrela con
-    `get_task`.
+    `text`: en título, descripción o clave, sin distinguir acentos ni mayúsculas. `labels`: con TODAS
+    estas. `issue_type`: epic|historia|tarea|bug|incidencia|subtarea. `column`: solo esa (nombre o
+    id); sin ella se miran `todo` e `in_progress`, e `include_done=True` añade las de cierre.
+    `limit`: 25 por omisión; `total` dice cuántas coincidían.
     """
     if issue_type and issue_type not in ISSUE_TYPES:
         raise FoundryError(f"issue_type no válido: {issue_type}. Usa {', '.join(ISSUE_TYPES)}.")
@@ -797,12 +787,9 @@ async def search_tasks(
 # ── tools: tableros ──────────────────────────────────────────────────────────
 @mcp.tool(annotations=SOLO_LEE)
 async def list_board_presets(ctx: Ctx) -> list[dict[str, Any]]:
-    """Las **plantillas de columnas** entre las que se elige al crear un tablero (FNV-257).
-
-    Cada una trae `key` (lo que se pasa a `create_board`), `label`, `template` (`kanban` o `scrum`;
-    la de Scrum enciende los sprints), `is_default` —la que se siembra si no se elige ninguna— y sus
-    `columns` con la categoría de cada una. **Léelas antes de crear un tablero**: las claves no se
-    adivinan, y elegir por lo que trae cada plantilla evita tener que rehacer las columnas después.
+    """Las plantillas de columnas para crear un tablero: `key` (lo que se pasa a `create_board`),
+    `label`, `template` (`kanban` o `scrum`, que enciende los sprints), `is_default` y sus `columns`
+    con su categoría. Léelas antes de crear: las claves no se adivinan.
     """
     return await _prepare(ctx).list_board_presets()
 
@@ -815,21 +802,14 @@ async def create_board(
     preset: str = "",
     columns: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Crea un tablero Kanban nuevo, sin forjar la 'Gran Idea'.
+    """Crea un tablero: personal sin `space_id`, o de un Área con `space_id`.
 
-    - sin `space_id`: tablero **personal** (solo la cuenta lo ve).
-    - con `space_id`: tablero dentro de un **Área** (lo ven sus miembros; requiere colaborador/dueño).
-
-    **Con qué columnas nace** (FNV-256):
-    - sin nada: las de la plantilla por omisión del backend (el flujo en inglés);
-    - `preset`: la `key` de una plantilla de `list_board_presets` (p. ej. la del flujo en español);
-    - `columns`: las columnas **a medida**, `[{"name": "Ideas", "category": "todo"}, …]` — entre 2 y
-      10, con `category` en `todo`/`in_progress`/`done`, y opcionalmente `color` (`#rrggbb`). Hace
-      falta al menos una de entrada (`todo`) y una de cierre (`done`), sin nombres repetidos.
-
-    Con columnas a medida conviene mandar TAMBIÉN el `preset` del que se parte: es quien fija la
-    plantilla del tablero (`kanban`/`scrum`) y, con ella, si hay sprints. Las reglas las hace
-    cumplir el servidor: si algo no cuadra, contesta con el motivo y no crea nada a medias.
+    Columnas con las que nace: sin nada, las de la plantilla por omisión; con `preset`, las de una
+    plantilla de `list_board_presets`; con `columns`, a medida:
+    `[{"name": "Ideas", "category": "todo"}, …]`, entre 2 y 10, `category` en todo/in_progress/done,
+    `color` opcional (`#rrggbb`), al menos una de entrada y una de cierre y sin nombres repetidos.
+    Con columnas a medida manda TAMBIÉN el `preset`: fija la plantilla (`kanban`/`scrum`) y con ella
+    si hay sprints. Si algo no cuadra, el servidor lo rechaza sin crear nada a medias.
     """
     client = _prepare(ctx)
     clean = preset.strip() or None
@@ -897,11 +877,8 @@ async def add_column(
     category: str = "in_progress",
     color: str = "",
 ) -> list[dict[str, Any]]:
-    """Añade una columna al final del tablero y devuelve cómo quedan todas.
-
-    `category`: `todo` (por donde entra el trabajo) · `in_progress` · `done` (cierra la tarjeta).
-    `color`: `#rrggbb` opcional; sin él, la columna hereda el color de su categoría, que es lo
-    normal. El servidor aplica el tope de diez columnas y rechaza un nombre que ya exista.
+    """Añade una columna al final y devuelve todas. `category`: todo · in_progress · done.
+    `color`: `#rrggbb` opcional (sin él, el de su categoría). Máximo diez y sin nombres repetidos.
     """
     client = _prepare(ctx)
     await client.add_column(
@@ -929,11 +906,8 @@ async def rename_column(
 async def set_column_category(
     ctx: Ctx, initiative_id: str, column: str, category: str
 ) -> list[dict[str, Any]]:
-    """Cambia el TIPO de una columna: `todo` · `in_progress` · `done`.
-
-    Es lo que decide de verdad el comportamiento —dónde entra una tarjeta nueva y qué la da por
-    cerrada—, así que no es un adorno. El tablero debe conservar al menos una de entrada y una de
-    cierre: si el cambio lo dejaría sin una de las dos, el servidor lo rechaza.
+    """Cambia el tipo de una columna (todo · in_progress · done): es lo que decide dónde entra
+    una tarjeta y qué la cierra. El tablero debe conservar al menos una de entrada y una de cierre.
     """
     client = _prepare(ctx)
     columns = await _board_columns(client, initiative_id)
@@ -964,10 +938,8 @@ async def set_column_color(
 async def reorder_columns(
     ctx: Ctx, initiative_id: str, columns: list[str]
 ) -> list[dict[str, Any]]:
-    """Reordena las columnas del tablero: pasa **todas**, por nombre o por id, en el orden que quedan.
-
-    Es la lista completa, no un movimiento suelto: así el resultado es el que se ve, sin depender de
-    dónde estaba cada una. Si falta o sobra alguna, el servidor lo rechaza en vez de adivinar.
+    """Reordena las columnas: pasa **todas**, por nombre o id, en el orden final. Si falta o
+    sobra alguna, el servidor lo rechaza.
     """
     client = _prepare(ctx)
     actuales = await _board_columns(client, initiative_id)
@@ -990,13 +962,9 @@ async def reorder_columns(
 async def delete_column(
     ctx: Ctx, initiative_id: str, column: str, reassign_to: str = ""
 ) -> dict[str, Any]:
-    """Borra una columna del tablero. **Si tiene tarjetas, hay que decir a dónde van** con
-    `reassign_to` (otra columna, por nombre o id): se mudan con el estado de la columna destino y
-    el traslado queda en el historial de cada tarjeta.
-
-    Se comprueba antes de llamar cuántas tarjetas hay dentro, para poder decirlo en vez de fallar
-    con un error escueto. El tablero no puede quedarse sin columna de entrada o de cierre; eso lo
-    impide el servidor.
+    """Borra una columna. Si tiene tarjetas, di a dónde van con `reassign_to` (otra columna, por
+    nombre o id): se mudan con su estado y queda en su historial. El tablero no puede quedarse sin
+    columna de entrada ni de cierre.
     """
     client = _prepare(ctx)
     columns = await _board_columns(client, initiative_id)
@@ -1032,6 +1000,9 @@ async def delete_column(
 
 
 # ── tools: tarjetas ──────────────────────────────────────────────────────────
+# Nace oficial aunque la cree la IA (FNV-109): la procedencia es información, no fricción;
+# el control lo tiene la persona que pide la tarjeta. Lo que sí debe revisar alguien va por
+# los gates (`propose_criterion`, `record_decision`).
 @mcp.tool(annotations=CREA)
 async def create_task(
     ctx: Ctx,
@@ -1047,28 +1018,18 @@ async def create_task(
     story_points: float | None = None,
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Crea una tarjeta (work item) en un tablero.
+    """Crea una tarjeta (work item) en un tablero. Nace al final de la columna.
 
-    `column`: nombre (tolerante a acentos/mayúsculas) o id de columna; la tarjeta toma el estado del
-    workflow de esa columna. Los nombres NO son iguales en todos los tableros, así que **déjalo
-    vacío** y nacerá en la columna de entrada — la primera de categoría `todo`, se llame "Backlog",
-    "To Do", "Ideas" o como el equipo la haya llamado—; pásalo solo para elegir otra, y mira
-    `get_board` si dudas.
-    `priority`: highest|high|medium|low|lowest (se aceptan también baja|media|alta). `kind`:
-    tarea|bug|incidencia.
-    `issue_type`: epic|historia|tarea|bug|incidencia|subtarea (jerarquía ágil). `parent_id`: tarjeta
-    padre. Quién cuelga de quién: una **épica** agrupa historias, tareas, bugs e incidencias; una
-    **historia** agrupa tareas, bugs, incidencias y subtareas; una tarea/bug/incidencia agrupa
-    subtareas; una subtarea es hoja. Una subtarea **exige** padre; una épica no puede tenerlo.
-    `story_points`: estimación.
-    `agent_model`: override opcional del modelo para esta creación; vacío usa la configuración.
-    `assignee` (opcional): nombre/email de un miembro (tableros de Área) o id de usuario.
-    Nace al final de la columna. Requiere rol colaborador/dueño.
+    `column`: nombre o id; **déjalo vacío** y nacerá en la columna de entrada del tablero (la primera
+    de categoría `todo`), porque los nombres cambian de un tablero a otro.
+    `priority`: highest|high|medium|low|lowest (o baja|media|alta). `kind`: tarea|bug|incidencia.
+    `issue_type`: epic|historia|tarea|bug|incidencia|subtarea; `parent_id`: la tarjeta padre. Una
+    épica agrupa historias, tareas, bugs e incidencias; una historia, tareas, bugs, incidencias y
+    subtareas; una tarea/bug/incidencia, subtareas. La subtarea exige padre; la épica no lo admite.
+    `story_points`: estimación. `assignee`: nombre, email o id de un miembro.
 
-    Queda marcada como creada por la IA (procedencia `ia`, `origin=agent`), pero **oficial** —no
-    pasa por el gate de propuesta (FNV-109): la procedencia es información, no fricción; el control
-    lo tiene la persona que te pide la tarjeta—. Para trabajo que SÍ deba revisar una persona antes
-    de darlo por bueno, usa `propose_criterion`/`record_decision`, que sí nacen a la espera.
+    Nace **oficial**, no propuesta: lo que deba revisar una persona va con `propose_criterion` o
+    `record_decision`.
     """
     client = _prepare(ctx, agent_model)
     detail = await client.get_initiative(initiative_id)
@@ -1125,13 +1086,11 @@ async def edit_task(
     assignee: str | None = None,
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Edita una tarjeta (**parcial**: solo cambian los campos que pases).
+    """Edita una tarjeta; solo cambian los campos que pases.
 
     `priority`: highest|high|medium|low|lowest (o baja|media|alta). `kind`: tarea|bug|incidencia.
-    `assignee`: nombre/email/id de un miembro; pasa `assignee=""` (cadena vacía) para **quitar** el
-    responsable. Para tipo/padre usa `set_task_hierarchy`; para estimación/fechas, `set_task_details`.
-    `agent_model`: override opcional del modelo para esta edición; vacío usa la configuración.
-    Requiere colaborador/dueño.
+    `assignee`: nombre, email o id; `""` lo quita. Tipo y padre: `set_task_hierarchy`; estimación y
+    fechas: `set_task_details`.
     """
     client = _prepare(ctx, agent_model)
     detail = await client.get_initiative(initiative_id)
@@ -1158,11 +1117,8 @@ async def edit_task(
 
 @mcp.tool(annotations=BORRA)
 async def delete_task(ctx: Ctx, initiative_id: str, task_id: str) -> dict[str, Any]:
-    """Elimina una tarjeta del tablero (irreversible). Requiere rol colaborador/dueño.
-
-    Antes de borrar mira **qué se va con ella** —su historial, sus adjuntos y sus criterios— y lo
-    pregunta, porque una tarjeta vieja puede llevar dentro el porqué de media decisión. Si el
-    cliente no sabe preguntar, sigue adelante y lo dice en la respuesta.
+    """Borra una tarjeta (irreversible). Antes pregunta, diciendo qué se va con ella (historial,
+    adjuntos, criterios); si el cliente no sabe preguntar, sigue y lo dice en la respuesta.
     """
     client = _prepare(ctx)
     detail = await client.get_initiative(initiative_id)
@@ -1179,11 +1135,8 @@ async def delete_task(ctx: Ctx, initiative_id: str, task_id: str) -> dict[str, A
 async def create_tasks_from_seeds(
     ctx: Ctx, initiative_id: str, seed_ids: list[str], agent_model: str = ""
 ) -> list[dict[str, Any]]:
-    """Vivero→Tablero: manda semillas (ideas) del Vivero como tarjetas **propuestas** a la columna
-    de entrada del tablero, se llame como se llame.
-
-    Nacen como propuesta (`status_agent="proposed"`, `origin="agent"`); se aceptan/rechazan desde
-    la app. `seed_ids` son ids de semillas del mismo espacio del tablero. Requiere colaborador/dueño.
+    """Manda semillas del Vivero como tarjetas **propuestas** a la columna de entrada del
+    tablero; se aceptan o rechazan desde la app. `seed_ids`: semillas del mismo espacio.
     """
     return await _prepare(ctx, agent_model).create_tasks_from_seeds(initiative_id, seed_ids)
 
@@ -1197,13 +1150,8 @@ async def add_task_comment(
     content: str,
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Agrega una **nota** libre al historial de una tarjeta (cómo se implementó o avanzó).
-
-    Equivale a `add_task_entry` con `kind="nota"`. Para registrar un aporte estructurado (un avance,
-    un criterio de aceptación, una decisión, un bloqueo, una verificación o una pregunta) usa mejor
-    `add_task_entry`: queda tipado y distinguible en el hilo, no aplanado en texto. Queda marcado
-    como nota del **agente** (procedencia `ia`). `agent_model` permite declarar el modelo concreto;
-    si se omite usa `FOUNDRY_AGENT_MODEL`. Append-only; requiere rol colaborador/dueño.
+    """Deja una **nota** libre en el hilo de una tarjeta. Para un avance, criterio, decisión,
+    bloqueo, verificación o pregunta usa mejor `add_task_entry` o su tool propia: queda tipado.
     """
     return await _add_agent_comment(
         ctx, initiative_id, task_id, content, agent_model=agent_model
@@ -1220,21 +1168,12 @@ async def add_task_entry(
     meta: dict[str, Any] | None = None,
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Registra un **aporte tipado** del agente en el hilo de una tarjeta (ADR-0017), en lugar de un
-    comentario plano, para que su output quede estructurado y trazable.
+    """Deja un **aporte tipado** en el hilo de una tarjeta, en vez de un comentario plano.
 
-    `kind` (tipo de aporte): `avance` (progreso), `criterio` (de aceptación), `decision`,
-    `bloqueo` (marca la tarjeta con la bandera de impedimento), `verificacion` (evidencia/prueba),
-    `pregunta` o `nota` (libre). `meta` es JSON libre para adjuntar contexto legible por máquina,
-    p. ej. `{"commit": "abc123", "ci": "green"}`.
-
-    Los tres casos frecuentes tienen tool propia, más cómoda y con los datos ya estructurados:
-    **`report_progress`** (avance), **`flag_blocker`** (bloqueo) y **`report_verification`**
-    (verificación). Usa este tool general para los demás tipos.
-
-    Queda marcado como aporte del **agente** (procedencia `ia`; la API guarda con qué cuenta se
-    escribió). `agent_model` sobreescribe la configuración para esta entrada. Append-only;
-    requiere rol colaborador/dueño.
+    `kind`: avance · criterio · decision · bloqueo (levanta la bandera de impedimento) ·
+    verificacion · pregunta · nota. `meta`: JSON libre para máquinas (p. ej. `{"commit": "abc123"}`).
+    Para avance, bloqueo y verificación usa mejor `report_progress`, `flag_blocker` y
+    `report_verification`, que estructuran los datos.
     """
     return await _add_agent_comment(
         ctx,
@@ -1269,18 +1208,10 @@ async def report_progress(
     repo_url: str = "",
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Reporta un **avance** en una tarjeta: qué hiciste, cuánto queda y en qué código se ve.
+    """Deja un **avance** en una tarjeta: qué se hizo, cuánto queda y en qué código se ve.
 
-    Úsalo cada vez que completes una parte del trabajo, para que el progreso quede tipado en el
-    hilo (`avance`) en vez de aplanado en un comentario suelto. Equivale a
-    `add_task_entry(kind="avance")` pero con los datos del avance estructurados:
-
-    - `percent`: 0–100, cuánto de la tarjeta está hecho.
-    - `checklist`: pasos en markdown — `"[x] hecho"` / `"[ ] pendiente"`.
-    - `repo_url`: el commit/PR donde se materializó. Queda **vinculado a la tarjeta** (ADR-0016) y
-      se muestra como enlace dentro de la entrada: es la traza IA→código.
-
-    Queda con procedencia `ia`. Append-only; requiere rol colaborador/dueño.
+    `percent`: 0–100. `checklist`: pasos `"[x] hecho"` / `"[ ] pendiente"`. `repo_url`: el commit o
+    PR; queda vinculado a la tarjeta y enlazado en la entrada.
     """
     if percent is not None and not 0 <= percent <= 100:
         raise FoundryError(f"percent debe estar entre 0 y 100 (recibido: {percent}).")
@@ -1310,14 +1241,9 @@ async def flag_blocker(
     repo_url: str = "",
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Marca que una tarjeta está **bloqueada** y por qué (aporte `bloqueo`).
-
-    Además de dejar el motivo tipado en el hilo, **levanta la bandera de impedimento** de la
-    tarjeta, que se ve en el tablero. Úsalo en cuanto algo te impida seguir —una credencial que
-    falta, una decisión humana pendiente, un test que no pasa— en lugar de decirlo solo en el chat,
-    donde la persona no lo verá si la sesión se cierra.
-
-    `repo_url` (opcional): el commit/PR donde se ve el problema. Procedencia `ia`; colaborador/dueño.
+    """Marca una tarjeta como **bloqueada** y por qué: deja el motivo en el hilo y levanta la
+    bandera de impedimento del tablero. Úsalo en cuanto algo te frene (una credencial, una decisión
+    humana, un test que no pasa), no solo en el chat. `repo_url`: el commit/PR donde se ve.
     """
     client = _prepare(ctx, agent_model)
     meta = await _repo_meta(client, initiative_id, task_id, repo_url)
@@ -1342,14 +1268,10 @@ async def report_verification(
     url: str = "",
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Registra la **verificación** de una tarjeta: la evidencia de que lo hecho funciona (o no).
+    """Deja la **verificación** de una tarjeta: la evidencia de que funciona, o de que no.
 
-    Aporte `verificacion`. `status`: ok|fallo|parcial. `detail`: qué probaste y con qué resultado
-    (tests, build, prueba manual). `url`: la evidencia (CI, PR, captura); se muestra como enlace
-    dentro de la entrada.
-
-    Úsalo después de correr los tests o de probar el cambio, para que "está verificado" sea un dato
-    del tablero —con su evidencia— y no una afirmación en el chat. Procedencia `ia`.
+    `status`: ok|fallo|parcial. `detail`: qué probaste y con qué resultado (tests, build, prueba a
+    mano), con números. `url`: la evidencia (CI, PR, captura).
     """
     st = _validate(status, VERIFICATION_STATUSES, "status")
     meta: dict[str, Any] = {"status": st}
@@ -1374,12 +1296,8 @@ async def propose_criterion(
     text: str,
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Propone un **criterio de aceptación** para una tarjeta (ADR-0017 F2): "para darla por hecha
-    debe cumplirse Z".
-
-    Nace como **propuesta** (`proposed`, procedencia `ia`): una persona lo acepta o descarta en el
-    tablero (gate humano) antes de que cuente como criterio oficial. Úsalo cuando, al trabajar una
-    tarjeta, identifiques una condición verificable de "hecho". Requiere rol colaborador/dueño.
+    """Propone un **criterio de aceptación** («para darla por hecha debe cumplirse Z»). Nace
+    propuesto y cuenta cuando lo acepta una persona. Úsalo al encontrar una condición verificable.
     """
     return await _prepare(ctx, agent_model).add_task_criterion(initiative_id, task_id, text)
 
@@ -1394,13 +1312,8 @@ async def record_decision(
     repo_url: str = "",
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Registra una **decisión de diseño** de una tarjeta (ADR-0017 F2), estilo ADR-lite: "elegí A
-    por B".
-
-    Nace como **propuesta** (`proposed`, procedencia `ia`); una persona la acepta/descarta (gate
-    humano). Si pasas `repo_url` (un commit/PR/repositorio, ADR-0016), la decisión queda **atada a
-    ese código** para la trazabilidad IA→commit — *"Claude decidió X, materializado en `abc123`"*.
-    Requiere rol colaborador/dueño.
+    """Registra una **decisión de diseño** de una tarjeta («elegí A por B»). Nace propuesta: la
+    acepta o descarta una persona. Con `repo_url` (commit, PR o repo) queda atada a ese código.
     """
     client = _prepare(ctx, agent_model)
     repo_link_id: str | None = None
@@ -1420,13 +1333,9 @@ async def record_decision(
 async def list_criteria(
     ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
-    """Lee los **criterios de aceptación** de una tarjeta con el estado de su gate (ADR-0017 F2):
-    `status` = `proposed` (propuesto por la IA, espera decisión humana) · `accepted` (oficial) ·
-    `rejected` (descartado). Trae también `source` (humano|ia|colaborativo) y `checked`.
-
-    Úsalo para **cerrar el círculo**: tras proponer con `propose_criterion`, una persona decide en
-    el tablero **o** con `review_criterion`; al releer aquí ves qué se aceptó/descartó (por si tu
-    sesión se cerró y la decisión se tomó desde la app). No muta nada.
+    """Lee los criterios de aceptación de una tarjeta: `status` = proposed (espera a una persona) ·
+    accepted · rejected, más `source` (humano|ia|colaborativo) y `checked`. Sirve para ver qué se
+    decidió sobre lo que propusiste, también si se decidió desde la app.
     """
     return await _prepare(ctx).list_task_criteria(initiative_id, task_id)
 
@@ -1435,12 +1344,9 @@ async def list_criteria(
 async def review_criterion(
     ctx: Ctx, initiative_id: str, task_id: str, criterion_id: str, accept: bool
 ) -> dict[str, Any]:
-    """**Gate humano** de un criterio de aceptación (ADR-0017 F2): `accept=True` lo vuelve oficial;
-    `accept=False` lo descarta. El `criterion_id` sale de `list_criteria`.
-
-    Es la **decisión de una persona**, la misma que el botón del tablero: úsalo solo cuando alguien
-    te lo pida explícitamente. **No auto-apruebes** criterios que tú mismo propusiste. Requiere rol
-    colaborador/dueño.
+    """**Gate humano** de un criterio: `accept=True` lo vuelve oficial y `accept=False` lo
+    descarta (`criterion_id` de `list_criteria`). Es la decisión de una persona: úsala solo si te lo
+    piden y **nunca** sobre lo que propusiste tú.
     """
     return await _prepare(ctx).review_task_criterion(
         initiative_id, task_id, criterion_id, accept=accept
@@ -1451,12 +1357,8 @@ async def review_criterion(
 async def list_decisions(
     ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
-    """Lee las **decisiones de diseño** de una tarjeta con el estado de su gate (ADR-0017 F2):
-    `status` = `proposed` · `accepted` · `rejected`; más `source` (humano|ia|colaborativo) y el
-    `repo_link_id` al que atan (ADR-0016), si lo hay.
-
-    Complemento de lectura de `record_decision`: al releer aquí ves qué decisiones se oficializaron
-    o descartaron (incluso si se decidió desde la app mientras no estabas). No muta nada.
+    """Lee las decisiones de diseño de una tarjeta: `status` (proposed · accepted · rejected),
+    `source` (humano|ia|colaborativo) y el `repo_link_id` al que atan, si lo hay.
     """
     return await _prepare(ctx).list_task_decisions(initiative_id, task_id)
 
@@ -1465,11 +1367,9 @@ async def list_decisions(
 async def review_decision(
     ctx: Ctx, initiative_id: str, task_id: str, decision_id: str, accept: bool
 ) -> dict[str, Any]:
-    """**Gate humano** de una decisión de diseño (ADR-0017 F2): `accept=True` la vuelve oficial;
-    `accept=False` la descarta. El `decision_id` sale de `list_decisions`.
-
-    Es la **decisión de una persona** (equivale al botón del tablero): úsalo solo a pedido explícito
-    y **no auto-apruebes** decisiones que tú mismo registraste. Requiere rol colaborador/dueño.
+    """**Gate humano** de una decisión: `accept=True` la vuelve oficial y `accept=False` la
+    descarta (`decision_id` de `list_decisions`). Es la decisión de una persona: úsala solo si te lo
+    piden y **nunca** sobre lo que registraste tú.
     """
     return await _prepare(ctx).review_task_decision(
         initiative_id, task_id, decision_id, accept=accept
@@ -1480,13 +1380,9 @@ async def review_decision(
 async def review_task_proposal(
     ctx: Ctx, initiative_id: str, task_id: str, accept: bool
 ) -> dict[str, Any]:
-    """**Gate humano** de una **tarjeta** propuesta por la IA (`status_agent="proposed"`, ADR-0017
-    F2): `accept=True` la vuelve una tarjeta oficial del tablero; `accept=False` la marca `rejected`
-    (el front la oculta, pero no se borra: conserva la traza).
-
-    Su estado se lee en `get_board` (campo `status_agent` de cada tarjeta). Es la **decisión de una
-    persona**, la misma que el botón del tablero: úsalo solo a pedido explícito y **no auto-apruebes**
-    tarjetas que tú mismo propusiste. Requiere rol colaborador/dueño.
+    """**Gate humano** de una tarjeta propuesta (`status_agent="proposed"`): `accept=True` la
+    vuelve oficial; `accept=False` la marca `rejected` (se oculta, no se borra). Es la decisión de una
+    persona: úsala solo si te lo piden y **nunca** sobre lo que propusiste tú.
     """
     return await _prepare(ctx).review_task_proposal(initiative_id, task_id, accept=accept)
 
@@ -1501,15 +1397,12 @@ async def add_test_case(
     expected: str = "",
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Deja un **caso de prueba** en una historia (FNV-127): un escenario de QA a validar en la fase
-    de revisión antes de dar por terminada la historia. Distinto de un criterio de aceptación (ese es
-    la definición de hecho, con gate): aquí NO hay gate — el caso nace `pending` y se valida
-    corriéndolo (`mark_test_case`).
+    """Deja un **caso de prueba** en un entregable: una historia (lo normal) o una
+    tarea/bug/incidencia suelta; épicas y subtareas, no. Apunta a 1–4 por historia.
 
-    Solo cuelga de un **entregable**: una historia (lo normal), o una tarea/bug/incidencia suelta. El
-    backend **rechaza** una épica (demasiado gruesa) o una subtarea. Apunta a 1–4 casos por historia.
-    `title` es el escenario; `steps`, cómo ejecutarlo; `expected`, qué debería pasar. Queda marcado
-    de la IA (procedencia `ia`). Requiere rol colaborador/dueño.
+    `title`: el escenario; `steps`: cómo ejecutarlo; `expected`: qué debe pasar. Nace `pending` y sin
+    gate: se valida corriéndolo con `mark_test_case` (el criterio de aceptación, con gate, es
+    `propose_criterion`).
     """
     return await _prepare(ctx, agent_model).add_test_case(
         initiative_id, task_id, title, steps, expected
@@ -1520,11 +1413,9 @@ async def add_test_case(
 async def list_test_cases(
     ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
-    """Lee los **casos de prueba** de una tarjeta (FNV-127) con su estado (`pending` sin validar ·
-    `passed` · `failed`), sus pasos, el resultado esperado y la procedencia. No muta nada.
-
-    Cuando todos están `passed`, la historia está «lista para cerrar» (una persona la mueve a Hecho:
-    no se cierra sola). Úsalo para saber qué falta validar antes de dar por terminada una historia.
+    """Lee los casos de prueba de una tarjeta: estado (pending · passed · failed), pasos,
+    resultado esperado y procedencia. Con todos en `passed` está lista para cerrar, pero la cierra
+    una persona.
     """
     return await _prepare(ctx).list_test_cases(initiative_id, task_id)
 
@@ -1538,13 +1429,10 @@ async def mark_test_case(
     status: str,
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Registra el **resultado de correr** un caso de prueba (FNV-127): `status` = `passed` (pasó) ·
-    `failed` (falló) · `pending` (aún sin validar). El `test_case_id` sale de `list_test_cases`.
+    """Registra el resultado de correr un caso de prueba: `status` = passed · failed · pending.
 
-    Es la validación de QA. Si acabas de ejecutar el escenario (p. ej. corriste la prueba), registra
-    aquí el veredicto real; si el equipo valida a mano en el tablero, no hace falta. Cada marca deja
-    además una corrida en la **bitácora** (FNV-159), aunque el veredicto repita el anterior: mírala
-    con `list_test_executions`. Queda en el historial. Requiere rol colaborador/dueño.
+    El `test_case_id` sale de `list_test_cases`. Cada marca deja una corrida en la bitácora
+    (`list_test_executions`), aunque repita el veredicto anterior.
     """
     return await _prepare(ctx, agent_model).mark_test_case(
         initiative_id, task_id, test_case_id, status
@@ -1555,11 +1443,9 @@ async def mark_test_case(
 async def list_test_executions(
     ctx: Ctx, initiative_id: str, task_id: str, test_case_id: str = ""
 ) -> list[dict[str, Any]]:
-    """Lee la **bitácora de ejecuciones** de los casos de prueba (FNV-159): cada marca deja una
-    corrida —resultado (`passed`/`failed`/`pending`), quién (humano o agente + modelo), en qué etapa
-    (columna) y cuándo—, y se conserva **aunque el veredicto repita** el anterior. Sin `test_case_id`
-    trae toda la tarjeta; con él, las de un solo caso. Es el registro que sobrevive a las rondas de
-    QA y a los cambios de etapa, complementario al estado actual de `list_test_cases`. No muta nada.
+    """Lee la bitácora de corridas de los casos de prueba: resultado, quién (humano o agente y
+    modelo), en qué columna y cuándo; se guarda aunque el veredicto repita. Sin `test_case_id`, toda
+    la tarjeta. El estado actual está en `list_test_cases`.
     """
     return await _prepare(ctx).list_test_executions(
         initiative_id, task_id, test_case_id or None
@@ -1578,12 +1464,9 @@ async def get_task_comments(
 async def get_task_history(
     ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
-    """Historial **estructurado** de una tarjeta (ADR-0014, E4): qué campo cambió, de qué valor a
-    qué valor, quién y cuándo (orden cronológico).
-
-    Distinto de `get_task_comments` (notas de texto): aquí cada entrada es un cambio de campo
-    (`created`, `column_id`, `status_id`, `priority`, `assignee_id`, `sprint_id`, `label`, `link`,
-    …). Los valores van en crudo (ids/enums). Útil para leer "quién cambió qué y cuándo".
+    """Historial estructurado de una tarjeta: qué campo cambió (`column_id`, `priority`,
+    `assignee_id`, `sprint_id`, `label`, `link`…), de qué valor a cuál, quién y cuándo. Valores en
+    crudo (ids, enums). Los comentarios van en `get_task_comments`.
     """
     return await _prepare(ctx).get_task_history(initiative_id, task_id)
 
@@ -1598,13 +1481,9 @@ async def transition_task(
     order: int = 0,
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Transiciona una tarjeta a otro **estado** del workflow moviéndola a su columna (ADR-0014).
-
-    Cada columna del tablero corresponde a un estado, así que `status` es el nombre (o el id) de la
-    columna destino **de ESE tablero**: no hay una lista universal de estados — míralos con
-    `get_board`, que además dice la categoría de cada columna (por dónde entra el trabajo y cuál lo
-    cierra). Equivale a `move_task` pero pensado como cambio de estado; deja rastro en el historial
-    (status_id/column_id). `order`: 0=arriba.
+    """Mueve una tarjeta a otro estado, que es su columna: `status` = nombre o id de la columna
+    destino **de ese tablero** (no hay estados universales: míralos con `get_board`). Queda en el
+    historial. `order`: 0 = arriba.
     """
     client = _prepare(ctx, agent_model)
     detail = await client.get_initiative(initiative_id)
@@ -1622,13 +1501,11 @@ async def set_task_hierarchy(
     parent_id: str | None = None,
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Fija el tipo y el padre de una tarjeta (jerarquía ágil, ADR-0014 + FNV-24).
+    """Fija el tipo y el padre de una tarjeta (es un `set` explícito).
 
-    `issue_type`: epic|historia|tarea|bug|incidencia|subtarea. `parent_id`: tarjeta padre. Quién
-    cuelga de quién: una **épica** agrupa historias, tareas, bugs e incidencias; una **historia**
-    agrupa tareas, bugs, incidencias y subtareas; una tarea/bug/incidencia agrupa subtareas; una
-    subtarea es hoja. Una subtarea exige padre; una épica es raíz y no puede tenerlo; sin ciclos.
-    Es un `set` explícito. Requiere colaborador/dueño.
+    `issue_type`: epic|historia|tarea|bug|incidencia|subtarea. Una épica agrupa historias, tareas,
+    bugs e incidencias; una historia, tareas, bugs, incidencias y subtareas; una tarea/bug/incidencia,
+    subtareas. La subtarea exige padre, la épica no lo admite y no puede haber ciclos.
     """
     body: dict[str, Any] = {"issue_type": _validate(issue_type, ISSUE_TYPES, "issue_type")}
     if parent_id:
@@ -1647,12 +1524,10 @@ async def set_task_details(
     flagged: bool | None = None,
     agent_model: str = "",
 ) -> dict[str, Any]:
-    """Actualiza (PATCH) los campos ricos de una tarjeta: estimación, fechas e impedimento.
+    """Cambia estimación, fechas o impedimento de una tarjeta; lo que no pases se conserva.
 
-    **Solo cambia los campos que pases; los omitidos se conservan** (lee el estado actual y hace
-    merge). `story_points`: estimación (número ≥0). `start_date`/`due_date`: fechas ISO
-    (YYYY-MM-DD); pasa `""` para **borrar** una fecha. `flagged`: marca/quita el impedimento.
-    Requiere colaborador/dueño.
+    `story_points`: número ≥ 0. `start_date`/`due_date`: ISO (AAAA-MM-DD); `""` la borra. `flagged`:
+    pone o quita el impedimento.
     """
     client = _prepare(ctx, agent_model)
     detail = await client.get_initiative(initiative_id)
@@ -1751,7 +1626,7 @@ async def link_tasks(
     agent_model: str = "",
 ) -> list[dict[str, Any]]:
     """Vincula dos tarjetas del mismo tablero. `link_type`: blocks|is_blocked_by|relates_to (desde
-    la óptica de `task_id`). Devuelve los vínculos de `task_id`. Requiere colaborador/dueño.
+    la óptica de `task_id`). Devuelve los vínculos de `task_id`.
     """
     lt = _validate(link_type, LINK_TYPES, "link_type")
     return await _prepare(ctx, agent_model).link_tasks(initiative_id, task_id, target_id, lt)
@@ -1777,11 +1652,8 @@ async def unlink_tasks(
     link_type: str | None = None,
     agent_model: str = "",
 ) -> list[dict[str, Any]]:
-    """Quita el/los vínculo(s) entre `task_id` y `target_id` (resuelve el id del vínculo solo).
-
-    Sin `link_type` borra todos los vínculos hacia `target_id`; con él (blocks|is_blocked_by|
-    relates_to, desde la óptica de `task_id`) borra solo ese. Devuelve los vínculos restantes.
-    Requiere colaborador/dueño.
+    """Quita vínculos entre `task_id` y `target_id`: sin `link_type`, todos; con él (blocks ·
+    is_blocked_by · relates_to, desde `task_id`), solo ese. Devuelve los que quedan.
     """
     client = _prepare(ctx, agent_model)
     want_type = _validate(link_type, LINK_TYPES, "link_type") if link_type else None
@@ -1814,10 +1686,9 @@ async def link_repo(
     title: str = "",
     agent_model: str = "",
 ) -> list[dict[str, Any]]:
-    """Vincula una tarjeta a un recurso de repositorio por URL. `kind`: repository|branch|
-    pull_request|commit. `title` es una etiqueta legible opcional (p. ej. "PR #12"). Pensado para
-    que Claude Code asocie el repo/branch/PR donde trabaja a la tarjeta. Devuelve los vínculos de
-    la tarjeta. Requiere colaborador/dueño.
+    """Vincula una tarjeta a un recurso de repositorio por URL.
+    `kind`: repository|branch|pull_request|commit. `title`: etiqueta legible opcional («PR #12»).
+    Devuelve los vínculos de la tarjeta.
     """
     k = _validate(kind, REPO_KINDS, "kind")
     return await _prepare(ctx, agent_model).link_repo(initiative_id, task_id, url, k, title)
@@ -1842,7 +1713,7 @@ async def unlink_repo(
     agent_model: str = "",
 ) -> list[dict[str, Any]]:
     """Quita el vínculo de repositorio de `task_id` cuya URL coincide con `url` (resuelve el id del
-    vínculo solo). Devuelve los vínculos restantes. Requiere colaborador/dueño.
+    vínculo solo). Devuelve los vínculos restantes.
     """
     client = _prepare(ctx, agent_model)
     links = await client.list_repo_links(initiative_id, task_id)
@@ -1928,13 +1799,9 @@ async def list_task_attachments(
 async def read_task_attachment(
     ctx: Ctx, initiative_id: str, task_id: str, attachment_id: str
 ) -> Image | str:
-    """Lee un adjunto de una tarjeta por su id (el id sale de `list_task_attachments`).
-
-    - **Imagen** (png/jpg/webp/…): se devuelve como imagen para que Claude la **vea** — útil para
-      mockups, capturas o diagramas adjuntos a la tarjeta.
-    - **Texto** (text/*, json, csv, yaml, sql…): se devuelve el contenido como texto.
-    - **Otro binario** (pdf, zip, …): se devuelven metadatos + un aviso (el MCP no puede
-      renderizarlo aquí; descárgalo desde la app). Límite del backend: 10 MB.
+    """Lee un adjunto por su id (de `list_task_attachments`). Una imagen vuelve como imagen,
+    para verla; el texto (text/*, json, csv, yaml, sql…), como texto; otro binario (pdf, zip…), solo
+    sus metadatos: se descarga desde la app.
     """
     data, content_type, filename = await _prepare(ctx).read_task_attachment(
         initiative_id, task_id, attachment_id
@@ -1952,19 +1819,12 @@ async def upload_task_attachment(
     text: str = "",
     base64_data: str = "",
 ) -> dict[str, Any]:
-    """Sube un archivo a una tarjeta: el informe, el diagrama o la captura que acabas de producir.
+    """Sube un archivo a una tarjeta (un informe, un diagrama, una captura). Tope: 10 MB.
 
-    Tres formas de decir QUÉ se sube, y hay que usar exactamente una:
-    - `path`: la ruta del archivo en el equipo donde corre el agente. El nombre sale de la ruta
-      salvo que pases `filename`.
-    - `text`: el contenido tal cual (un markdown, un csv, un log). **Exige `filename`**.
-    - `base64_data`: bytes en base64, para lo binario que no está en disco (una imagen generada).
-      **Exige `filename`**.
-
-    El tipo de contenido se deduce de la extensión del nombre; lo desconocido va como binario
-    genérico, así que **pon extensión** o el adjunto se descargará sin saber qué es. Tope del
-    servidor: 10 MB — se comprueba antes de subir para no fallar a mitad. Queda registrado en el
-    historial de la tarjeta, con quién lo subió. Requiere rol colaborador/dueño.
+    Usa exactamente UNA forma: `path` (ruta en el equipo del agente; el nombre sale de ella salvo
+    que pases `filename`), `text` (contenido tal cual; **exige `filename`**) o `base64_data` (bytes
+    en base64; **exige `filename`**). El tipo se deduce de la extensión: **ponla**, o se guardará
+    como binario genérico.
     """
     data, name = _attachment_source(path, filename, text, base64_data)
     if not data:
@@ -1984,11 +1844,8 @@ async def upload_task_attachment(
 async def delete_task_attachment(
     ctx: Ctx, initiative_id: str, task_id: str, attachment_id: str
 ) -> dict[str, Any]:
-    """Borra un adjunto de una tarjeta. **Es irreversible**: el archivo no se recupera.
-
-    El id sale de `list_task_attachments`. Se lee antes de borrar para poder decir qué desapareció
-    —un «hecho» a secas no vale para algo que no se puede deshacer— y el backend lo registra en el
-    historial de la tarjeta. Requiere rol colaborador/dueño.
+    """Borra un adjunto de una tarjeta (irreversible; el id sale de
+    `list_task_attachments`). Dice qué se borró y queda en el historial.
     """
     client = _prepare(ctx)
     antes = await client.list_task_attachments(initiative_id, task_id)
@@ -2122,11 +1979,9 @@ async def create_note(
     parent_id: str | None = None,
     icon: str | None = None,
 ) -> dict[str, Any]:
-    """Crea una nota en el Área (opcionalmente dentro de otra nota/carpeta y con contenido).
-
-    `markdown` acepta encabezados, listas (también anidadas y checklists), citas, código, tablas
-    e inline con negrita/enlaces; los [[wikilinks]] crean backlinks. Lo que escribas aquí nace
-    como contenido de IA: identifícalo si aporta y no pises trabajo humano sin pedirlo.
+    """Crea una nota en el Área, opcionalmente dentro de otra y con contenido. `markdown` admite
+    encabezados, listas (anidadas y checklists), citas, código, tablas, negrita y enlaces; los
+    [[wikilinks]] crean backlinks. No pises trabajo humano sin pedirlo.
     """
     client = _prepare(ctx)
     doc = await client.create_document(space_id, title, parent_id)
@@ -2143,11 +1998,9 @@ async def create_note(
 async def write_note(
     ctx: Ctx, document_id: str, markdown: str, mode: str = "replace"
 ) -> dict[str, Any]:
-    """Escribe markdown en una nota YA existente. `mode`: replace (pisa, deja versión en el
-    historial) o append (añade al final, sin conflicto).
-
-    OJO: `replace` gana sobre lo no guardado del editor. Sobre una nota escrita por humanos,
-    prefiere `append` o pide confirmación antes de reemplazar. Contenido con procedencia de IA.
+    """Escribe markdown en una nota que YA existe. `mode`: replace (la pisa; deja versión en el
+    historial y gana sobre lo no guardado del editor) o append (añade al final). En una nota escrita
+    por personas, usa `append` o pregunta antes de reemplazar.
     """
     if mode not in ("replace", "append"):
         raise FoundryError(f'Modo inválido: "{mode}". Usa replace o append.')
@@ -2202,11 +2055,8 @@ async def rename_note(
 
 @mcp.tool(annotations=BORRA)
 async def delete_note(ctx: Ctx, document_id: str) -> str:
-    """Borra una nota (y con ella deja huérfanas a sus hijas: muévelas antes si importan).
-
-    Borrar una nota es decisión humana, así que se **pregunta** antes, diciendo cuál es y cuántas
-    notas la enlazan — perder una nota enlazada rompe los backlinks de las demás. Si el cliente no
-    sabe preguntar, sigue adelante.
+    """Borra una nota (sus hijas quedan huérfanas: muévelas antes si importan). Antes pregunta,
+    diciendo cuál es y cuántas notas la enlazan; si el cliente no sabe preguntar, sigue.
     """
     client = _prepare(ctx)
     try:
@@ -2230,10 +2080,8 @@ async def delete_note(ctx: Ctx, document_id: str) -> str:
 
 @mcp.tool(annotations=CREA)
 async def link_notes(ctx: Ctx, from_document_id: str, to_document_id: str) -> dict[str, Any]:
-    """Enlaza dos notas añadiendo al final de la origen un [[wikilink]] a la destino.
-
-    El enlace queda VISIBLE en la nota (así funciona el producto: el wikilink del contenido es lo
-    que alimenta los backlinks y el mapa del Área); no hay enlaces invisibles de base de datos.
+    """Enlaza dos notas: añade al final de la de origen un [[wikilink]] visible a la de destino,
+    que es lo que alimenta los backlinks y el mapa del Área.
     """
     client = _prepare(ctx)
     target = await client.get_document(to_document_id)
@@ -2248,19 +2096,12 @@ async def link_notes(ctx: Ctx, from_document_id: str, to_document_id: str) -> di
 async def link_note_to_task(
     ctx: Ctx, document_id: str, target_id: str, lead: str = ""
 ) -> dict[str, Any]:
-    """Ata una nota a una tarjeta (o semilla) que YA existe: el `#tarjeta` sin abrir el editor.
+    """Ata una nota a una tarjeta o semilla que YA existe (el chip `#tarjeta`, sin abrir el editor).
 
-    Para cuando las dos existen ya y ninguna salió de la otra («esta nota habla de esta tarjeta»).
-    Si la tarjeta debe NACER de la nota, usa `extract_tasks_from_note`, que además deja la
-    procedencia del párrafo.
-
-    El chip se añade al final de la nota y queda VISIBLE, como si lo hubiera tecleado una persona:
-    escribir `#PROY-12` con `write_note` NO sirve —dejaría una almohadilla de texto, no un
-    vínculo—, porque el chip lleva el id dentro y de ahí sale el backlink. Después la tarjeta
-    enseña la nota en «MENCIONADA EN» (`get_task_notes`) y el mapa del Área dibuja la arista.
-
-    `target_id` es el id de la tarjeta o de la semilla, y tiene que ser del Área de la nota.
-    `lead` es el texto que precede al chip; por defecto «Menciona a » / «Nace de ».
+    Si la tarjeta debe NACER de la nota, usa `extract_tasks_from_note`. El chip se añade al final de
+    la nota, visible; escribir `#PROY-12` con `write_note` NO sirve: queda texto, no vínculo. Luego
+    la tarjeta la enseña en `get_task_notes`. `target_id`: id de la tarjeta o semilla, del Área de la
+    nota. `lead`: texto antes del chip (por defecto «Menciona a » / «Nace de »).
     """
     result = await _prepare(ctx).link_document_mention(document_id, target_id, lead)
     return {**result, "hint": "Queda escrito en la nota; se ve en el editor al recargarla."}
@@ -2320,11 +2161,8 @@ async def get_note_backlinks(ctx: Ctx, document_id: str) -> list[dict[str, Any]]
 async def extract_tasks_from_note(
     ctx: Ctx, document_id: str, initiative_id: str
 ) -> list[dict[str, Any]]:
-    """Saca tarjetas del Tablero desde una nota, con la referencia a su párrafo de origen.
-
-    Es el puente Notas → Tablero con trazabilidad (ADR-0011): cada tarjeta nace PROPUESTA
-    (gate humano) y enlazada al bloque del que salió — desde la tarjeta se vuelve al párrafo.
-    Usa la IA del backend (flujo configurable por usuario).
+    """Saca tarjetas de una nota con la IA del backend: nacen PROPUESTAS (gate humano) y
+    enlazadas al párrafo del que salieron.
     """
     return await _prepare(ctx).extract_tasks_from_document(document_id, initiative_id)
 
@@ -2421,6 +2259,134 @@ da por cerrado) y mira, tarjeta a tarjeta, lo que el tablero ya sabe:
 
 Devuelve un resumen corto y ordenado por lo que más duele, con la clave de cada tarjeta. No muevas
 ninguna ni cierres nada: esto es una lectura, y qué hacer con ella lo decide el equipo."""
+
+
+# ── qué se expone y cómo se llama (FNV-313) ──────────────────────────────────
+#
+# Las 76 herramientas pesaban ~75 000 caracteres en `tools/list`, y Codex y los clientes que usan
+# `mcpServers` las cargan enteras en cada sesión. Tres palancas, aplicadas en un solo sitio
+# (`_finish_tools`) para que la migración al SDK 2.x (FNV-310) solo tenga que tocar aquí:
+#  - grupos activables con FOUNDRY_TOOLSETS (como el MCP de GitHub); sin la variable, todos;
+#  - sin los `title` que pydantic pone a cada argumento («Initiative Id»): repiten el nombre;
+#  - sin `outputSchema`: los nuestros son genéricos (`additionalProperties: true`), no le dicen
+#    nada al cliente y obligan a mandar cada resultado dos veces (texto + structuredContent).
+# Y `title` legible en todas, que es lo que enseñan los clientes en vez de `set_task_hierarchy`.
+
+# Siempre activas, se elija el grupo que se elija: sin ellas no hay sesión.
+ALWAYS_ON = ("login", "logout", "whoami")
+TOOLSETS: dict[str, tuple[str, ...]] = {
+    # Trabajar tarjetas: leer el tablero, crearlas y moverlas, el hilo, los gates y los vínculos.
+    "tableros": (
+        "list_spaces", "list_boards", "list_all_boards", "get_board", "get_task", "search_tasks",
+        "list_board_presets", "create_board", "move_board_to_space", "create_task", "create_epic",
+        "list_epics", "edit_task", "move_task", "transition_task", "delete_task",
+        "set_task_hierarchy", "set_task_details", "set_task_labels", "link_tasks", "unlink_tasks",
+        "get_task_links", "get_task_history", "review_task_proposal", "add_task_comment",
+        "add_task_entry", "get_task_comments", "report_progress", "report_verification",
+        "flag_blocker", "propose_criterion", "list_criteria", "review_criterion",
+        "record_decision", "list_decisions", "review_decision", "link_repo", "unlink_repo",
+        "get_repo_links",
+    ),
+    "qa": ("add_test_case", "list_test_cases", "mark_test_case", "list_test_executions"),
+    "sprints": ("create_sprint", "start_sprint", "complete_sprint", "assign_task_to_sprint", "list_sprints"),
+    "columnas": (
+        "add_column", "rename_column", "set_column_category", "set_column_color",
+        "reorder_columns", "delete_column",
+    ),
+    "adjuntos": (
+        "upload_task_attachment", "list_task_attachments", "read_task_attachment",
+        "delete_task_attachment",
+    ),
+    "notas": (
+        "list_notes", "read_note", "search_notes", "create_note", "write_note",
+        "create_note_collection", "move_note", "rename_note", "delete_note", "link_notes",
+        "get_note_backlinks", "link_note_to_task", "get_task_notes", "extract_tasks_from_note",
+        "create_tasks_from_seeds",
+    ),
+}  # fmt: skip
+TITLES: dict[str, str] = {
+    "login": "Iniciar sesión", "logout": "Cerrar sesión", "whoami": "Quién soy (y con qué modelo)",
+    "list_spaces": "Listar Áreas", "list_boards": "Listar tableros", "list_all_boards": "Todos los tableros",
+    "get_board": "Ver tablero", "get_task": "Ver tarjeta", "search_tasks": "Buscar tarjetas",
+    "list_board_presets": "Plantillas de columnas", "create_board": "Crear tablero",
+    "move_board_to_space": "Mover tablero a un Área", "create_task": "Crear tarjeta",
+    "create_epic": "Crear épica", "list_epics": "Listar épicas", "edit_task": "Editar tarjeta",
+    "move_task": "Mover tarjeta", "transition_task": "Cambiar estado de tarjeta",
+    "delete_task": "Borrar tarjeta", "set_task_hierarchy": "Cambiar tipo y padre",
+    "set_task_details": "Estimación y fechas", "set_task_labels": "Poner etiquetas",
+    "link_tasks": "Vincular tarjetas", "unlink_tasks": "Desvincular tarjetas",
+    "get_task_links": "Ver vínculos", "get_task_history": "Ver historial de cambios",
+    "review_task_proposal": "Aceptar o descartar tarjeta propuesta",
+    "add_task_comment": "Comentar tarjeta", "add_task_entry": "Aporte tipado en el hilo",
+    "get_task_comments": "Ver hilo de la tarjeta", "report_progress": "Dejar avance",
+    "report_verification": "Dejar verificación", "flag_blocker": "Marcar bloqueo",
+    "propose_criterion": "Proponer criterio", "list_criteria": "Ver criterios",
+    "review_criterion": "Aceptar o descartar criterio", "record_decision": "Registrar decisión",
+    "list_decisions": "Ver decisiones", "review_decision": "Aceptar o descartar decisión",
+    "link_repo": "Enlazar commit o PR", "unlink_repo": "Quitar enlace de repo",
+    "get_repo_links": "Ver enlaces de repo", "add_test_case": "Añadir caso de prueba",
+    "list_test_cases": "Ver casos de prueba", "mark_test_case": "Marcar caso de prueba",
+    "list_test_executions": "Bitácora de pruebas", "create_sprint": "Crear sprint",
+    "start_sprint": "Arrancar sprint", "complete_sprint": "Cerrar sprint",
+    "assign_task_to_sprint": "Meter tarjeta en sprint", "list_sprints": "Listar sprints",
+    "add_column": "Añadir columna", "rename_column": "Renombrar columna",
+    "set_column_category": "Cambiar tipo de columna", "set_column_color": "Color de columna",
+    "reorder_columns": "Reordenar columnas", "delete_column": "Borrar columna",
+    "upload_task_attachment": "Adjuntar archivo", "list_task_attachments": "Ver adjuntos",
+    "read_task_attachment": "Leer adjunto", "delete_task_attachment": "Borrar adjunto",
+    "list_notes": "Listar notas", "read_note": "Leer nota", "search_notes": "Buscar notas",
+    "create_note": "Crear nota", "write_note": "Reescribir nota",
+    "create_note_collection": "Crear colección de notas", "move_note": "Mover nota",
+    "rename_note": "Renombrar nota", "delete_note": "Borrar nota", "link_notes": "Enlazar notas",
+    "get_note_backlinks": "Quién enlaza esta nota", "link_note_to_task": "Atar nota a tarjeta",
+    "get_task_notes": "Notas que mencionan la tarjeta",
+    "extract_tasks_from_note": "Sacar tarjetas de una nota",
+    "create_tasks_from_seeds": "Convertir semillas en tarjetas",
+}  # fmt: skip
+
+
+def _selected_tools(toolsets: tuple[str, ...]) -> set[str]:
+    """Las herramientas de los grupos pedidos (más las de sesión). Sin grupos, o con `todos`, todas.
+
+    Un nombre de grupo desconocido se avisa por stderr (stdout es el canal del protocolo) y se
+    ignora: equivocarse en un nombre no debería dejar al agente sin herramientas.
+    """
+    if not toolsets or "todos" in toolsets or "all" in toolsets:
+        return set(ALWAYS_ON).union(*TOOLSETS.values())
+    unknown = [t for t in toolsets if t not in TOOLSETS]
+    if unknown:
+        print(
+            f"foundry-boards: FOUNDRY_TOOLSETS trae grupos que no existen ({', '.join(unknown)}); "
+            f"los que hay son {', '.join(TOOLSETS)}.",
+            file=sys.stderr,
+        )
+    return set(ALWAYS_ON).union(*(TOOLSETS[t] for t in toolsets if t in TOOLSETS))
+
+
+def _strip_schema_titles(node: Any) -> None:
+    """Quita los `title` que pydantic genera para cada argumento y modelo: repiten el nombre."""
+    if isinstance(node, dict):
+        node.pop("title", None)
+        for value in node.get("properties", {}).values():
+            _strip_schema_titles(value)
+        for key in ("items", "anyOf", "oneOf", "allOf", "$defs"):
+            child = node.get(key)
+            for sub in child.values() if isinstance(child, dict) else child or []:
+                _strip_schema_titles(sub)
+
+
+def _finish_tools(server: FastMCP, toolsets: tuple[str, ...]) -> None:
+    keep = _selected_tools(toolsets)
+    for tool in list(server._tool_manager.list_tools()):
+        if tool.name not in keep:
+            server.remove_tool(tool.name)
+            continue
+        tool.title = TITLES.get(tool.name, tool.title)
+        _strip_schema_titles(tool.parameters)
+        tool.fn_metadata.output_schema = None  # resultado sin structuredContent duplicado
+
+
+_finish_tools(mcp, load_config().toolsets)
 
 
 def main() -> None:

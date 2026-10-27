@@ -95,6 +95,7 @@ cliente) o, si trabajas con una copia del código, en un `.env` en su raíz.
 | `FOUNDRY_TIMEOUT` | Segundos de espera a la API (30 por omisión). |
 | `FOUNDRY_AGENT_SOURCE` | Qué cliente firma lo que crea el agente. `auto` lo deduce de la sesión MCP; si tu cliente se anuncia con un nombre genérico, fíjalo (`codex`, `claude_code`, `opencode`, `gemini`…). |
 | `FOUNDRY_AGENT_MODEL` | El modelo que usa el agente, si es siempre el mismo. Lo que el agente declare en la sesión manda sobre esto. |
+| `FOUNDRY_TOOLSETS` | Qué grupos de herramientas exponer, separados por comas: `tableros` (tarjetas, hilo, gates, vínculos), `qa`, `sprints`, `columnas`, `adjuntos`, `notas`. Sin la variable, todos. `login`, `logout` y `whoami` van siempre. Úsalo en clientes que cargan todas las herramientas en el contexto (Codex, los de `mcpServers`): con solo `notas` la lista pesa unos 9 000 caracteres en vez de 47 000. |
 | `FOUNDRY_TOKEN`, o `FOUNDRY_EMAIL` + `FOUNDRY_PASSWORD` | Solo para automatización o para clientes sin diálogo: el MCP entra sin preguntar. Para uso normal, no los definas. |
 
 ## Identidad del agente

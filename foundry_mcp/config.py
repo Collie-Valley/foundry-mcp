@@ -42,6 +42,8 @@ class Config:
     agent_source: str
     # MCP no estandariza el modelo; se declara aquí o por llamada de herramienta.
     agent_model: str
+    # Grupos de herramientas que se exponen (FOUNDRY_TOOLSETS); vacío = todos (FNV-313).
+    toolsets: tuple[str, ...] = ()
 
 
 def load_config() -> Config:
@@ -72,4 +74,7 @@ def load_config() -> Config:
         env_password=os.getenv("FOUNDRY_PASSWORD", ""),
         agent_source=os.getenv("FOUNDRY_AGENT_SOURCE", "auto").strip() or "auto",
         agent_model=detected_model,
+        toolsets=tuple(
+            name for raw in os.getenv("FOUNDRY_TOOLSETS", "").split(",") if (name := raw.strip().lower())
+        ),
     )
