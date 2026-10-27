@@ -80,7 +80,7 @@ FOUNDRY_TOOLSETS = "tableros,qa"
   call requires approval, but approval policy is never»* hasta que las apruebes, por ejemplo con
   `tools.add_task_comment.approval_mode = "approve"` en ese mismo bloque.
 
-**OpenCode.** En `opencode.json` (OpenCode 1.x):
+**OpenCode.** En `opencode.json` (cualquier OpenCode desde la 1.18):
 
 ```json
 {
@@ -96,9 +96,10 @@ FOUNDRY_TOOLSETS = "tableros,qa"
 }
 ```
 
-Las variables van en `"environment"`, no en `"env"`: OpenCode ignora `env` sin avisar. En OpenCode
-v2 el fichero es `opencode.jsonc`, los servidores van bajo `mcp.servers`, se apagan con
-`"disabled": true` y las variables se citan como `{env:NOMBRE}`:
+Las variables van en `"environment"`, no en `"env"`: OpenCode ignora `env` sin avisar. El formato
+nuevo, el de la documentación v2 de OpenCode, lo entiende ya la 1.19: fichero `opencode.jsonc`,
+servidores bajo `mcp.servers`, `"disabled": true` para apagarlos y variables citadas como
+`{env:NOMBRE}`:
 
 ```jsonc
 {

@@ -266,6 +266,16 @@ def _exigir_si(confirmacion: ElicitationResult[ConfirmForm]) -> None:
         raise FoundryError("Borrado cancelado: no se ha tocado nada.")
 
 
+# Lo que se dice cuando el diálogo de login vuelve sin datos. No siempre lo canceló una persona: un
+# cliente sin pantalla (p. ej. `codex exec`) lo cancela solo, y «cancelada por el usuario» mandaba a
+# buscar a alguien que no existía (salió probando FNV-314).
+_LOGIN_CANCELADO = (
+    "No se ha iniciado sesión: el diálogo se canceló o se rechazó. Si el cliente no tiene pantalla "
+    "(una ejecución automática, como `codex exec`), no puede mostrarlo: define FOUNDRY_TOKEN, o "
+    "entra una vez desde un cliente interactivo marcando «recordar»."
+)
+
+
 async def _token_desde(form: LoginForm) -> str:
     """Del formulario de login a un token: el pegado tal cual, o el que da email + contraseña."""
     if form.token.strip():
@@ -313,7 +323,7 @@ async def _reauth(ctx: Ctx) -> str:
             "o FOUNDRY_EMAIL/FOUNDRY_PASSWORD como variables de entorno."
         ) from e
     if result.action != "accept" or result.data is None:
-        raise FoundryError("Autenticación cancelada por el usuario.")
+        raise FoundryError(_LOGIN_CANCELADO)
     return await _token_desde(result.data)
 
 
@@ -619,7 +629,7 @@ async def login(
     """
     data = getattr(credenciales, "data", None)
     if credenciales.action != "accept" or data is None:
-        raise FoundryError("Autenticación cancelada por el usuario.")
+        raise FoundryError(_LOGIN_CANCELADO)
     client = _prepare(ctx)
     client.token = await _token_desde(data)
     me = await client.me()
