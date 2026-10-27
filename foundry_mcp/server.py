@@ -1304,6 +1304,26 @@ async def add_task_entry(
     )
 
 
+async def _ensure_repo_link(
+    client: FoundryClient,
+    initiative_id: str,
+    task_id: str,
+    repo_url: str,
+    kind: str = "commit",
+    title: str = "",
+) -> list[dict[str, Any]]:
+    """Deja la tarjeta enlazada a esa URL y devuelve sus vínculos. Si ya lo estaba, no hace nada.
+
+    El backend contesta 400 a un enlace repetido, y aquí es normal repetirlo: una decisión y el
+    avance que la cuenta citan el mismo commit. Ese 400 se llevaba por delante el avance entero, que
+    era lo que importaba guardar (salió cerrando FNV-317).
+    """
+    links = await client.list_repo_links(initiative_id, task_id)
+    if any(lk.get("url") == repo_url for lk in links):
+        return links
+    return await client.link_repo(initiative_id, task_id, repo_url, kind, title)
+
+
 async def _repo_meta(
     client: FoundryClient, initiative_id: str, task_id: str, repo_url: str, kind: str = "commit"
 ) -> dict[str, Any]:
@@ -1311,7 +1331,7 @@ async def _repo_meta(
     **dentro** de la propia entrada del hilo, no solo en la lista de repos de la tarjeta."""
     if not repo_url:
         return {}
-    await client.link_repo(initiative_id, task_id, repo_url, kind, "")
+    await _ensure_repo_link(client, initiative_id, task_id, repo_url, kind)
     return {"repo_url": repo_url}
 
 
@@ -1436,8 +1456,8 @@ async def record_decision(
     client = _prepare(ctx, agent_model)
     repo_link_id: str | None = None
     if repo_url:
-        # Reusa el vínculo de repo (ADR-0016): lo crea (idempotente por URL) y toma su id.
-        links = await client.link_repo(initiative_id, task_id, repo_url, "commit", "")
+        # Reusa el vínculo de repo (ADR-0016): lo crea si no estaba y toma su id.
+        links = await _ensure_repo_link(client, initiative_id, task_id, repo_url)
         repo_link_id = next(
             (lk["id"] for lk in links if lk.get("url") == repo_url),
             links[-1]["id"] if links else None,
@@ -1794,7 +1814,8 @@ async def unlink_tasks(
 
 
 # ── tools: vínculos de repositorio (ADR-0016, Opción A) ──────────────────────────
-@mcp.tool(annotations=CREA)
+# Idempotente (FNV-226): enlazar lo que ya estaba enlazado no es un error, es lo normal.
+@mcp.tool(annotations=ACTUALIZA)
 async def link_repo(
     ctx: Ctx,
     initiative_id: str,
@@ -1804,12 +1825,12 @@ async def link_repo(
     title: str = "",
     agent_model: str = "",
 ) -> list[dict[str, Any]]:
-    """Vincula una tarjeta a un recurso de repositorio por URL.
+    """Vincula una tarjeta a un recurso de repositorio por URL; si ya lo estaba, no hace nada.
     `kind`: repository|branch|pull_request|commit. `title`: etiqueta legible opcional («PR #12»).
     Devuelve los vínculos de la tarjeta.
     """
     k = _validate(kind, REPO_KINDS, "kind")
-    return await _prepare(ctx, agent_model).link_repo(initiative_id, task_id, url, k, title)
+    return await _ensure_repo_link(_prepare(ctx, agent_model), initiative_id, task_id, url, k, title)
 
 
 @mcp.tool(annotations=SOLO_LEE)
