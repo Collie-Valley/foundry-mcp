@@ -142,7 +142,7 @@ cliente) o, si trabajas con una copia del código, en un `.env` en su raíz.
 | `FOUNDRY_API_BASE` | Otro backend: el tuyo en local (`http://localhost:8000/api/v1`) o uno propio. Por omisión, `https://foundry.collie.digital/api/v1`. |
 | `FOUNDRY_TIMEOUT` | Segundos de espera a la API (30 por omisión). |
 | `FOUNDRY_AGENT_SOURCE` | Qué cliente firma lo que crea el agente. `auto` lo deduce de la sesión MCP; si tu cliente se anuncia con un nombre genérico, fíjalo (`codex`, `claude_code`, `opencode`, `gemini`…). |
-| `FOUNDRY_AGENT_MODEL` | El modelo que usa el agente, si es siempre el mismo. Lo que el agente declare en la sesión manda sobre esto. |
+| `FOUNDRY_AGENT_MODEL` | El modelo que usa el agente, si es siempre el mismo. Lo que diga el cliente (Codex) o declare el agente en la sesión manda sobre esto. |
 | `FOUNDRY_TOOLSETS` | Qué grupos de herramientas exponer, separados por comas: `tableros` (tarjetas, hilo, gates, vínculos), `qa`, `sprints`, `columnas`, `adjuntos`, `notas`. Sin la variable, todos. `login`, `logout` y `whoami` van siempre. Úsalo en clientes que cargan todas las herramientas en el contexto (Codex, los de `mcpServers`): con solo `notas` la lista pesa unos 9 000 caracteres en vez de 47 000. |
 | `FOUNDRY_TOKEN`, o `FOUNDRY_EMAIL` + `FOUNDRY_PASSWORD` | Solo para automatización o para clientes sin diálogo: el MCP entra sin preguntar. Para uso normal, no los definas. |
 
@@ -159,7 +159,11 @@ historial) queda marcado como hecho por una IA, con dos datos aparte:
 Foundry lo enseña como `IA · Codex · gpt-6-luna` junto a cada aporte, así que no hace falta firmar
 el texto.
 
-**El modelo hay que declararlo.** MCP no tiene un campo para él y ningún cliente se lo pasa a sus
+**Codex lo dice solo.** MCP no tiene un campo para el modelo, pero Codex manda el del turno en el
+`_meta` de cada llamada (`x-codex-turn-metadata`), y eso manda sobre lo que declare el agente: es el
+modelo exacto (`gpt-6-luna`, no `gpt-6`) y sigue un cambio de `/model` a mitad de sesión.
+
+**En los demás clientes, el modelo hay que declararlo.** Claude Code y OpenCode no se lo pasan a sus
 servidores, así que solo lo sabe el agente. Basta con decirlo **una vez**: al empezar, con
 `whoami(agent_model="…")`, o con el argumento `agent_model` de cualquier herramienta. El servidor lo
 recuerda y lo pone en todo lo que el agente haga durante la sesión, también en las herramientas que

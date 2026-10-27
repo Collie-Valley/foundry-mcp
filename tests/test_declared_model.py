@@ -17,13 +17,24 @@ from foundry_mcp import server
 from foundry_mcp.foundry import FoundryClient, set_agent_identity
 
 
-def _ctx(client_name: str) -> Any:
-    """Lo mínimo de un `Context` que mira el servidor: el `clientInfo` de la sesión."""
+def _ctx(client_name: str, meta: dict[str, Any] | None = None) -> Any:
+    """Lo mínimo de un `Context` que mira el servidor: el `clientInfo` de la sesión y, si se pasa, el
+    `_meta` de la petición en curso."""
     info = SimpleNamespace(name=client_name, title=None)
-    return SimpleNamespace(session=SimpleNamespace(client_params=SimpleNamespace(client_info=info)))
+    ctx = SimpleNamespace(session=SimpleNamespace(client_params=SimpleNamespace(client_info=info)))
+    if meta is not None:
+        ctx.request_context = SimpleNamespace(meta=meta)
+    return ctx
 
 
-class DeclaredModelEndToEndTests(IsolatedAsyncioTestCase):
+def _codex_turn(model: str) -> dict[str, Any]:
+    """El `_meta` que manda Codex 0.160.1 en cada `tools/call` (recortado a lo que importa)."""
+    return {"x-codex-turn-metadata": {"model": model, "reasoning_effort": "xhigh", "session_id": "s1"}}
+
+
+class _FakeApiTestCase(IsolatedAsyncioTestCase):
+    """Una API de Foundry de mentira que guarda cada petición para mirar sus cabeceras."""
+
     async def asyncSetUp(self) -> None:
         server._declared_model = ""
         self.requests: list[httpx.Request] = []
@@ -54,6 +65,8 @@ class DeclaredModelEndToEndTests(IsolatedAsyncioTestCase):
         set_agent_identity(None, None)
         await self.client._c.aclose()
 
+
+class DeclaredModelEndToEndTests(_FakeApiTestCase):
     async def test_whoami_declares_and_reports_the_identity(self) -> None:
         me = await server.whoami(_ctx("codex-mcp-client"), agent_model="gpt-6-luna")
         self.assertEqual(me["email"], "a@b.c")
@@ -74,3 +87,34 @@ class DeclaredModelEndToEndTests(IsolatedAsyncioTestCase):
         await server.whoami(_ctx("claude-code"))
         self.assertNotIn("x-foundry-agent-model", self.requests[-1].headers)
         self.assertEqual(self.requests[-1].headers["x-foundry-agent-source"], "claude_code")
+
+
+class ClientModelTests(_FakeApiTestCase):
+    """FNV-319: si el cliente dice en la petición con qué modelo trabaja, eso manda sobre lo que el
+    agente declara. Codex se declaraba «gpt-6» corriendo «gpt-6-luna»."""
+
+    async def test_the_model_codex_sends_wins_over_the_declared_one(self) -> None:
+        me = await server.whoami(_ctx("codex-mcp-client", _codex_turn("gpt-6-luna")), agent_model="gpt-6")
+        self.assertEqual(me["agente"], {"agent_source": "codex", "agent_model": "gpt-6-luna"})
+        self.assertEqual(self.requests[-1].headers["x-foundry-agent-model"], "gpt-6-luna")
+
+    async def test_it_follows_a_model_switch_in_the_middle_of_the_session(self) -> None:
+        await server.whoami(_ctx("codex-mcp-client", _codex_turn("gpt-6-luna")))
+        self.requests.clear()
+        await server.rename_column(
+            _ctx("codex-mcp-client", _codex_turn("gpt-5.6-terra")), "initiative-1", "column-1", "Probando"
+        )
+        self.assertTrue(self.requests, "la herramienta no llegó a llamar a la API")
+        for request in self.requests:
+            self.assertEqual(request.headers["x-foundry-agent-model"], "gpt-5.6-terra")
+
+    async def test_without_it_the_declared_model_still_counts(self) -> None:
+        """Un `_meta` sin el modelo (Claude Code, OpenCode) no borra lo declarado."""
+        await server.whoami(_ctx("claude-code", {"progressToken": 1}), agent_model="claude-opus-5-5")
+        self.assertEqual(self.requests[-1].headers["x-foundry-agent-model"], "claude-opus-5-5")
+        await server.whoami(_ctx("codex-mcp-client", {"x-codex-turn-metadata": {"model": "  "}}))
+        self.assertEqual(self.requests[-1].headers["x-foundry-agent-model"], "claude-opus-5-5")
+
+    async def test_the_client_model_is_capped(self) -> None:
+        me = await server.whoami(_ctx("codex-mcp-client", _codex_turn("m" * 500)))
+        self.assertEqual(len(me["agente"]["agent_model"]), 160)
