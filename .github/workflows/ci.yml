@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Estilo con la vara que fija pyproject.toml. Solo `ruff check`: el formateador automático no se
+  # usa en este proyecto, y un paso de formato que falla corta todos los que vienen detrás.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uvx ruff check .
+
+  # El paquete promete `requires-python = ">=3.10"`: se prueba en el suelo y en el techo, porque
+  # quien lo instala no usa la versión de Python que usamos aquí.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync          # incluye el grupo dev (pytest), declarado en pyproject.toml
+      - run: uv run pytest -q
+
+  # Que lo que se publicaría se construya, y que no lleve dentro nada que no debe: un `.env` puede
+  # contener credenciales de automatización.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv build
+      - name: El sdist no lleva ningún .env
+        run: |
+          if tar -tzf dist/*.tar.gz | grep -E '(^|/)\.env$'; then
+            echo "El sdist incluye un .env. Sin publicar."
+            exit 1
+          fi

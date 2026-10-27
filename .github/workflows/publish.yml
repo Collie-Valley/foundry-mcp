@@ -1,0 +1,46 @@
+name: Publicar en PyPI
+
+# Publicar es irreversible: una versión subida a PyPI no se puede reemplazar ni volver a subir.
+# Por eso no sale de un botón ni de un portátil, sino de una etiqueta del repositorio, y solo
+# después de que sus pruebas pasen.  Ejemplo:  git tag v0.1.1 && git push origin v0.1.1
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # PyPI no recibe ningún token: confía en la identidad que GitHub firma para este repositorio,
+    # este workflow y este entorno (trusted publishing / OIDC). No hay ningún secreto que guardar,
+    # rotar ni filtrar, pero el entorno `pypi` tiene que existir en el repositorio y coincidir con
+    # el publicador declarado en PyPI.
+    environment: pypi
+    # Declarar `permissions` deja en `none` todo lo que no se liste: sin `contents: read` el
+    # checkout no puede clonar.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Comprobar que la etiqueta dice la misma versión que el paquete
+        # Una etiqueta que no coincide con el `version` del pyproject publica un número distinto
+        # del que la gente cree haber etiquetado, y eso ya no se puede deshacer.
+        run: |
+          etiqueta="${GITHUB_REF_NAME#v}"
+          version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          if [ "$etiqueta" != "$version" ]; then
+            echo "La etiqueta dice $etiqueta y el paquete dice $version. Sin publicar."
+            exit 1
+          fi
+          echo "Publicando la versión $version."
+
+      - run: uv sync
+      - run: uv run pytest -q     # no se publica lo que no pasa sus propias pruebas
+      - run: uv build
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

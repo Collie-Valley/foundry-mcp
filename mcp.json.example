@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "foundry-boards": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["foundry-boards-mcp"],
+      "env": {
+        "FOUNDRY_AGENT_SOURCE": "auto"
+      }
+    }
+  }
+}

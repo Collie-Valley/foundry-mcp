@@ -1,0 +1,81 @@
+[project]
+# El nombre de distribución NO es el del módulo (`foundry_mcp`): `foundry-mcp` está cogido en PyPI
+# por un proyecto ajeno y vivo, así que el paquete se publica como `foundry-boards-mcp`, que además
+# es como se llama el servidor en la configuración de todos los clientes.
+name = "foundry-boards-mcp"
+version = "0.1.1"
+description = "MCP para administrar los tableros Kanban de Foundry desde agentes de IA."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Collie Valley" }]
+keywords = ["mcp", "model-context-protocol", "kanban", "agile", "foundry", "claude", "agents"]
+# Sin clasificador de licencia a propósito: con `license` ya en formato SPDX (PEP 639), repetirla
+# como clasificador es un error de empaquetado, no un duplicado inofensivo.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Natural Language :: Spanish",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Bug Tracking",
+    "Topic :: Utilities",
+]
+dependencies = [
+    # SDK oficial de Model Context Protocol (incluye FastMCP + elicitation). El techo en la 2.0 no
+    # es precaución: esa versión quitó `mcp.server.fastmcp`, de donde salen FastMCP, Context e
+    # Image, y el servidor ni siquiera llega a importarse. El `uv.lock` salva a quien trabaja en
+    # el repo, pero no viaja dentro del paquete: sin este techo, quien lo instale desde PyPI
+    # resuelve la 2.x y se encuentra un MCP que no arranca.
+    "mcp>=1.12,<2",
+    "httpx>=0.27",       # cliente HTTP async contra la API de Foundry
+    "python-dotenv>=1.0", # carga del .env local (solo config, no credenciales)
+    "keyring>=25",       # guarda el token en el gestor de credenciales del SO (opt-in)
+]
+
+# Desde la 0.1.1 el código vive en su propio repositorio público: quien llegue desde PyPI puede
+# leerlo, abrir una incidencia o mandar un arreglo, no solo ir al producto.
+[project.urls]
+Homepage = "https://foundry.collie.digital"
+Repository = "https://github.com/Collie-Valley/foundry-mcp"
+Issues = "https://github.com/Collie-Valley/foundry-mcp/issues"
+
+# Entry point: permite `uvx foundry-boards-mcp`, es decir, correr el MCP SIN clonar el repo (uv
+# baja solo este paquete y lo ejecuta). El comando se llama igual que el paquete a propósito: si
+# no coincidieran, instalarlo obligaría a explicar un `--from` en la primera línea de la guía.
+[project.scripts]
+foundry-boards-mcp = "foundry_mcp.server:main"
+
+# Grupo de desarrollo (PEP 735): `uv run pytest -q` ya funciona sin `--with pytest`.
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["foundry_mcp"]
+
+# La vara de estilo vive aquí, explícita: sin ella cada máquina mide con su propia configuración y
+# la CI mediría otra cosa. Solo `ruff check`; el formateador automático no se usa en este proyecto.
+[tool.ruff]
+line-length = 110          # el ancho con el que ya está escrito el código
+target-version = "py310"   # el mínimo que promete `requires-python`
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+# Escribimos en español: el guion corto de los rangos («0–100», «1–4 casos») es el correcto y no
+# un descuido de teclado. Sin esto, RUF002 pide cambiarlo por un guion normal en cada docstring.
+allowed-confusables = ["–"]
+
+[tool.ruff.lint.per-file-ignores]
+# En una prueba, leer un archivo de unos kilobytes dentro de una función asíncrona no bloquea a
+# nadie: no hay usuarios esperando ni un bucle de eventos compartido.
+"tests/**" = ["ASYNC240"]

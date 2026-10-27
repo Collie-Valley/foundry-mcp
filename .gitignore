@@ -1,0 +1,13 @@
+# Entorno y configuración local. El .env puede llevar credenciales de automatización
+# (FOUNDRY_EMAIL/FOUNDRY_PASSWORD/FOUNDRY_TOKEN): no se versiona nunca.
+.venv/
+.env
+
+# Lo que generan Python, las pruebas, ruff y `uv build`.
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
