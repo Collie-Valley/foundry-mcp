@@ -3,7 +3,7 @@
 # por un proyecto ajeno y vivo, así que el paquete se publica como `foundry-boards-mcp`, que además
 # es como se llama el servidor en la configuración de todos los clientes.
 name = "foundry-boards-mcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "MCP para administrar los tableros Kanban de Foundry desde agentes de IA."
 readme = "README.md"
 license = "MIT"
