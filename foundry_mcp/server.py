@@ -2189,6 +2189,9 @@ async def create_note(
     if markdown.strip():
         result = await client.write_document(str(doc["id"]), markdown, "replace")
         written = int(result.get("blocks_written", 0))
+        # La nota tal como queda tras escribirla: la de antes decía `seed_pending: false` y
+        # procedencia humana, justo lo contrario de lo que acaba de pasar (FNV-304).
+        doc = (await client.get_document(str(doc["id"])))["document"]
     return {"document": doc, "blocks_written": written, "nota": _MD_WRITE_NOTICE}
 
 
