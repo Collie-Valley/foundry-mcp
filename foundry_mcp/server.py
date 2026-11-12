@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import html
 import mimetypes
+import re
 import sys
 import unicodedata
 from collections.abc import Mapping
@@ -462,6 +464,45 @@ def _resolve_agent_model(explicit: str = "", *, ctx: Ctx | None = None) -> str |
     return _client_model(ctx) or _declared_model or load_config().agent_model.strip()[:160] or None
 
 
+# Una IA que escribe `&lt;slug&gt;` donde quería `<slug>` (FNV-325): pasó en app-pliegue, y el texto
+# quedó guardado con las entidades a la vista, en un criterio que ya nadie podía corregir.
+_ENTITY = re.compile(r"&(?:lt|gt|amp|quot|apos|#39);")
+# Lo que va entre comillas invertidas se respeta: ahí una entidad puede ser justo lo que se cuenta.
+_CODE = re.compile(r"(```.*?```|`[^`\n]*`)", re.DOTALL)
+ENTITY_WARNING = (
+    "Había entidades HTML (&lt;, &gt;, &amp;…) fuera del código y se guardaron como sus "
+    "caracteres (<, >, &). Escríbelos tal cual: el texto no es HTML."
+)
+
+
+def _unescape_entities(text: str) -> tuple[str, bool]:
+    """Convierte `&lt;`, `&gt;`, `&amp;`, `&quot;` y `&#39;` en su carácter, salvo dentro del
+    código (`…` o ```…```). Devuelve el texto y si cambió algo."""
+    if not _ENTITY.search(text):
+        return text, False
+    parts = _CODE.split(text)  # pares = fuera del código; impares = el código, intacto
+    for i in range(0, len(parts), 2):
+        parts[i] = _ENTITY.sub(lambda m: html.unescape(m.group(0)), parts[i])
+    fixed = "".join(parts)
+    return fixed, fixed != text
+
+
+def _clean(*texts: str) -> tuple[list[str], bool]:
+    """`_unescape_entities` sobre varios textos a la vez."""
+    fixed = [_unescape_entities(text) for text in texts]
+    return [text for text, _ in fixed], any(did for _, did in fixed)
+
+
+def _clean_optional(text: str | None) -> tuple[str | None, bool]:
+    """Como `_clean`, para un campo que puede no venir (`None` = no tocarlo)."""
+    return (None, False) if text is None else _unescape_entities(text)
+
+
+def _warned(result: dict[str, Any], changed: bool) -> dict[str, Any]:
+    """Si se convirtieron entidades, la respuesta lo dice: que la IA aprenda a no escribirlas."""
+    return {**result, "aviso": ENTITY_WARNING} if changed else result
+
+
 async def _add_agent_comment(
     ctx: Ctx,
     initiative_id: str,
@@ -474,7 +515,8 @@ async def _add_agent_comment(
 ) -> dict[str, Any]:
     """Único camino MCP para crear aportes: siempre adjunta la identidad de la sesión."""
 
-    return await _prepare(ctx, agent_model).add_task_comment(
+    content, changed = _unescape_entities(content)
+    result: dict[str, Any] = await _prepare(ctx, agent_model).add_task_comment(
         initiative_id,
         task_id,
         content,
@@ -483,6 +525,7 @@ async def _add_agent_comment(
         agent_source=_agent_source(ctx),
         agent_model=_resolve_agent_model(agent_model, ctx=ctx),
     )
+    return _warned(result, changed)
 
 
 def _columns_of(detail: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1173,6 +1216,7 @@ async def create_task(
     Nace **oficial**, no propuesta: lo que deba revisar una persona va con `propose_criterion` o
     `record_decision`.
     """
+    (title, description), changed = _clean(title, description)
     client = _prepare(ctx, agent_model)
     detail = await client.get_initiative(initiative_id)
     columns = _columns_of(detail)
@@ -1194,7 +1238,7 @@ async def create_task(
         body["parent_id"] = parent_id
     if story_points is not None:
         body["story_points"] = story_points
-    return await client.create_task(initiative_id, body)
+    return _warned(await client.create_task(initiative_id, body), changed)
 
 
 @mcp.tool(annotations=ACTUALIZA)
@@ -1234,6 +1278,9 @@ async def edit_task(
     `assignee`: nombre, email o id; `""` lo quita. Tipo y padre: `set_task_hierarchy`; estimación y
     fechas: `set_task_details`.
     """
+    title, title_changed = _clean_optional(title)
+    description, description_changed = _clean_optional(description)
+    changed = title_changed or description_changed
     client = _prepare(ctx, agent_model)
     detail = await client.get_initiative(initiative_id)
     task = _find_task(detail, task_id)
@@ -1254,7 +1301,7 @@ async def edit_task(
         body["assignee_id"] = None
     else:
         body["assignee_id"] = await _resolve_assignee(detail.get("space_id"), assignee)
-    return await client.edit_task(initiative_id, task_id, body)
+    return _warned(await client.edit_task(initiative_id, task_id, body), changed)
 
 
 async def _borrado_tarjeta(initiative_id: str, task_id: str, ctx: Ctx) -> _Borrado:
@@ -1476,12 +1523,18 @@ async def propose_criterion(
     initiative_id: str,
     task_id: str,
     text: str,
+    supersedes: str = "",
     agent_model: str = "",
 ) -> dict[str, Any]:
     """Propone un **criterio de aceptación** («para darla por hecha debe cumplirse Z»). Nace
     propuesto y cuenta cuando lo acepta una persona. Úsalo al encontrar una condición verificable.
+    Para corregir uno aceptado, propón el bueno con `supersedes`=su id: al aceptarse, lo retira.
     """
-    return await _prepare(ctx, agent_model).add_task_criterion(initiative_id, task_id, text)
+    text, changed = _unescape_entities(text)
+    result = await _prepare(ctx, agent_model).add_task_criterion(
+        initiative_id, task_id, text, supersedes_id=supersedes or None
+    )
+    return _warned(result, changed)
 
 
 @mcp.tool(annotations=CREA)
@@ -1492,11 +1545,14 @@ async def record_decision(
     title: str,
     rationale: str = "",
     repo_url: str = "",
+    supersedes: str = "",
     agent_model: str = "",
 ) -> dict[str, Any]:
     """Registra una **decisión de diseño** de una tarjeta («elegí A por B»). Nace propuesta: la
     acepta o descarta una persona. Con `repo_url` (commit, PR o repo) queda atada a ese código.
+    Si cambia una aceptada, pasa `supersedes`=su id: al aceptarse esta, la retira.
     """
+    (title, rationale), changed = _clean(title, rationale)
     client = _prepare(ctx, agent_model)
     repo_link_id: str | None = None
     if repo_url:
@@ -1506,9 +1562,15 @@ async def record_decision(
             (lk["id"] for lk in links if lk.get("url") == repo_url),
             links[-1]["id"] if links else None,
         )
-    return await client.add_task_decision(
-        initiative_id, task_id, title, rationale, repo_link_id=repo_link_id
+    result = await client.add_task_decision(
+        initiative_id,
+        task_id,
+        title,
+        rationale,
+        repo_link_id=repo_link_id,
+        supersedes_id=supersedes or None,
     )
+    return _warned(result, changed)
 
 
 @mcp.tool(annotations=SOLO_LEE)
@@ -1516,8 +1578,8 @@ async def list_criteria(
     ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
     """Lee los criterios de aceptación de una tarjeta: `status` = proposed (espera a una persona) ·
-    accepted · rejected, más `source` (humano|ia|colaborativo) y `checked`. Sirve para ver qué se
-    decidió sobre lo que propusiste, también si se decidió desde la app.
+    accepted · rejected · retired, más `source` (humano|ia|colaborativo), `checked` y
+    `supersedes_id`. Sirve para ver qué se decidió sobre lo que propusiste.
     """
     return await _prepare(ctx).list_task_criteria(initiative_id, task_id)
 
@@ -1539,8 +1601,8 @@ async def review_criterion(
 async def list_decisions(
     ctx: Ctx, initiative_id: str, task_id: str
 ) -> list[dict[str, Any]]:
-    """Lee las decisiones de diseño de una tarjeta: `status` (proposed · accepted · rejected),
-    `source` (humano|ia|colaborativo) y el `repo_link_id` al que atan, si lo hay.
+    """Lee las decisiones de diseño de una tarjeta: `status` (proposed · accepted · rejected ·
+    retired), `source`, `repo_link_id` y `supersedes_id`.
     """
     return await _prepare(ctx).list_task_decisions(initiative_id, task_id)
 
@@ -1555,6 +1617,65 @@ async def review_decision(
     """
     return await _prepare(ctx).review_task_decision(
         initiative_id, task_id, decision_id, accept=accept
+    )
+
+
+@mcp.tool(annotations=ACTUALIZA)
+async def edit_criterion(
+    ctx: Ctx,
+    initiative_id: str,
+    task_id: str,
+    criterion_id: str,
+    text: str,
+    agent_model: str = "",
+) -> dict[str, Any]:
+    """Corrige un criterio aún propuesto. Uno aceptado no se reescribe: `propose_criterion` con
+    `supersedes`."""
+    text, changed = _unescape_entities(text)
+    result = await _prepare(ctx, agent_model).update_task_criterion(
+        initiative_id, task_id, criterion_id, text
+    )
+    return _warned(result, changed)
+
+
+@mcp.tool(annotations=ACTUALIZA)
+async def edit_decision(
+    ctx: Ctx,
+    initiative_id: str,
+    task_id: str,
+    decision_id: str,
+    title: str,
+    rationale: str = "",
+    agent_model: str = "",
+) -> dict[str, Any]:
+    """Corrige una decisión aún propuesta. Una aceptada no se reescribe: `record_decision` con
+    `supersedes`."""
+    (title, rationale), changed = _clean(title, rationale)
+    result = await _prepare(ctx, agent_model).edit_task_decision(
+        initiative_id, task_id, decision_id, title, rationale
+    )
+    return _warned(result, changed)
+
+
+@mcp.tool(annotations=ACTUALIZA)
+async def retire_criterion(
+    ctx: Ctx, initiative_id: str, task_id: str, criterion_id: str, superseded_by: str = ""
+) -> dict[str, Any]:
+    """**Gate humano**: retira un criterio aceptado (queda tachado, enlazado a `superseded_by` si
+    lo sustituye otro). Úsala solo si te lo piden."""
+    return await _prepare(ctx).retire_task_criterion(
+        initiative_id, task_id, criterion_id, superseded_by or None
+    )
+
+
+@mcp.tool(annotations=ACTUALIZA)
+async def retire_decision(
+    ctx: Ctx, initiative_id: str, task_id: str, decision_id: str, superseded_by: str = ""
+) -> dict[str, Any]:
+    """**Gate humano**: retira una decisión aceptada (queda tachada, enlazada a `superseded_by` si
+    la sustituye otra). Úsala solo si te lo piden."""
+    return await _prepare(ctx).retire_task_decision(
+        initiative_id, task_id, decision_id, superseded_by or None
     )
 
 
@@ -2479,7 +2600,7 @@ ninguna ni cierres nada: esto es una lectura, y qué hacer con ella lo decide el
 
 # ── qué se expone y cómo se llama (FNV-313) ──────────────────────────────────
 #
-# Las 76 herramientas pesaban ~75 000 caracteres en `tools/list`, y Codex y los clientes que usan
+# Las herramientas (76 entonces) pesaban ~75 000 caracteres en `tools/list`, y Codex y los clientes que usan
 # `mcpServers` las cargan enteras en cada sesión. Tres palancas, aplicadas en un solo sitio
 # (`_finish_tools`) para que la migración al SDK 2.x (FNV-310) solo tenga que tocar aquí:
 #  - grupos activables con FOUNDRY_TOOLSETS (como el MCP de GitHub); sin la variable, todos;
@@ -2500,7 +2621,8 @@ TOOLSETS: dict[str, tuple[str, ...]] = {
         "get_task_links", "get_task_history", "review_task_proposal", "add_task_comment",
         "add_task_entry", "get_task_comments", "report_progress", "report_verification",
         "flag_blocker", "propose_criterion", "list_criteria", "review_criterion",
-        "record_decision", "list_decisions", "review_decision", "link_repo", "unlink_repo",
+        "edit_criterion", "retire_criterion", "record_decision", "list_decisions",
+        "review_decision", "edit_decision", "retire_decision", "link_repo", "unlink_repo",
         "get_repo_links",
     ),
     "qa": ("add_test_case", "list_test_cases", "mark_test_case", "list_test_executions"),
@@ -2539,6 +2661,8 @@ TITLES: dict[str, str] = {
     "propose_criterion": "Proponer criterio", "list_criteria": "Ver criterios",
     "review_criterion": "Aceptar o descartar criterio", "record_decision": "Registrar decisión",
     "list_decisions": "Ver decisiones", "review_decision": "Aceptar o descartar decisión",
+    "edit_criterion": "Corregir criterio propuesto", "retire_criterion": "Retirar criterio",
+    "edit_decision": "Corregir decisión propuesta", "retire_decision": "Retirar decisión",
     "link_repo": "Enlazar commit o PR", "unlink_repo": "Quitar enlace de repo",
     "get_repo_links": "Ver enlaces de repo", "add_test_case": "Añadir caso de prueba",
     "list_test_cases": "Ver casos de prueba", "mark_test_case": "Marcar caso de prueba",

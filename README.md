@@ -211,7 +211,7 @@ de borrar funcionan igual en las dos revisiones.
 
 ## Herramientas
 
-74 herramientas y 3 prompts. Cada una declara si **solo lee** (23), si **crea o actualiza** (45) o
+80 herramientas y 3 prompts. Cada una declara si **solo lee** (25), si **crea o actualiza** (49) o
 si **borra** (6): el cliente lo usa para saber qué puede aprobar solo y dónde pararse. Las que
 borran (tarjeta, nota, adjunto, columna) además preguntan antes y dicen qué se va a perder.
 
@@ -274,13 +274,23 @@ borran (tarjeta, nota, adjunto, columna) además preguntan antes y dicen qué se
 **Lo que decide una persona**
 
 La IA **propone** y una persona acepta o descarta, en la web o con estas herramientas. Las de
-revisión son la decisión de una persona: un agente no debería aprobar lo que él mismo propuso.
+revisión y las de retirar son la decisión de una persona: un agente no debería aprobar lo que él
+mismo propuso.
+
+Lo ya aceptado **no lo reescribe la IA**. Si hay que corregirlo, propone uno nuevo que lo sustituye
+(`supersedes`): lo oficial no cambia hasta que una persona lo acepte, y entonces el viejo queda
+retirado, tachado y enlazado al nuevo. Una persona sí lo corrige directamente en la web.
 
 | Herramienta | Qué hace |
 |---|---|
-| `propose_criterion` · `list_criteria` · `review_criterion` | Criterios de aceptación: proponer, leer su estado, aceptar o descartar. |
-| `record_decision` · `list_decisions` · `review_decision` | Decisiones de diseño, que se pueden atar a un commit. |
+| `propose_criterion` · `list_criteria` · `review_criterion` | Criterios de aceptación: proponer (o sustituir uno aceptado con `supersedes`), leer su estado, aceptar o descartar. |
+| `edit_criterion` · `retire_criterion` | Corregir un criterio que sigue propuesto · retirar uno aceptado que dejó de aplicar. |
+| `record_decision` · `list_decisions` · `review_decision` | Decisiones de diseño, que se pueden atar a un commit o sustituir a otra (`supersedes`). |
+| `edit_decision` · `retire_decision` | Corregir una decisión que sigue propuesta · retirar una aceptada que dejó de regir. |
 | `review_task_proposal` | Acepta o rechaza una tarjeta propuesta por la IA. |
+
+Los textos que la IA escribe en criterios, decisiones, comentarios y tarjetas no son HTML: si traen
+`&lt;`, `&gt;` o `&amp;` fuera del código, se guardan como `<`, `>` y `&`, y la respuesta lo avisa.
 
 **Casos de prueba**
 
