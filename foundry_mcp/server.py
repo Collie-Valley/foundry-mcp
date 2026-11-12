@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import html
+import inspect
 import mimetypes
 import re
 import sys
@@ -2723,6 +2724,9 @@ def _finish_tools(server: MCPServer, toolsets: tuple[str, ...]) -> None:
             continue
         tool.title = TITLES.get(tool.name, tool.title)
         _strip_schema_titles(tool.parameters)
+        # Sin la sangría del docstring: Python 3.13 ya la quita al compilar, pero en 3.10-3.12
+        # viajaba entera y la lista de tools/list pesaba unos 800 espacios de más.
+        tool.description = inspect.cleandoc(tool.description)
         tool.fn_metadata.output_schema = None  # resultado sin structuredContent duplicado
 
 
