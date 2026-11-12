@@ -399,14 +399,44 @@ class FoundryClient:
 
     # ── datos promovidos con gate: criterios + decisiones (ADR-0017 F2) ──────
     async def add_task_criterion(
-        self, initiative_id: str, task_id: str, text: str, *, as_agent: bool = True
+        self,
+        initiative_id: str,
+        task_id: str,
+        text: str,
+        *,
+        as_agent: bool = True,
+        supersedes_id: str | None = None,
     ) -> dict[str, Any]:
         """Añade un criterio de aceptación. `as_agent=True` (default del MCP) ⇒ nace `proposed`
-        (procedencia `ia`); una persona lo acepta/descarta en el tablero."""
+        (procedencia `ia`); una persona lo acepta/descarta en el tablero. `supersedes_id`: el
+        criterio aceptado que este sustituye (FNV-325); al aceptarse, aquel queda retirado."""
+        payload: dict[str, Any] = {"text": text, "as_agent": as_agent}
+        if supersedes_id:
+            payload["supersedes_id"] = supersedes_id
         return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/criteria",
-            json={"text": text, "as_agent": as_agent},
+            json=payload,
+        )
+
+    async def update_task_criterion(
+        self, initiative_id: str, task_id: str, criterion_id: str, text: str
+    ) -> dict[str, Any]:
+        """Corrige el texto de un criterio. Como IA: el backend solo lo deja si sigue propuesto."""
+        return await self._obj(
+            "PATCH",
+            f"/initiatives/{initiative_id}/tasks/{task_id}/criteria/{criterion_id}",
+            json={"text": text, "as_agent": True},
+        )
+
+    async def retire_task_criterion(
+        self, initiative_id: str, task_id: str, criterion_id: str, superseded_by: str | None
+    ) -> dict[str, Any]:
+        """Retira un criterio aceptado que dejó de aplicar (FNV-325): veredicto humano."""
+        return await self._obj(
+            "POST",
+            f"/initiatives/{initiative_id}/tasks/{task_id}/criteria/{criterion_id}/retire",
+            json={"superseded_by": superseded_by},
         )
 
     async def add_task_decision(
@@ -418,9 +448,11 @@ class FoundryClient:
         *,
         as_agent: bool = True,
         repo_link_id: str | None = None,
+        supersedes_id: str | None = None,
     ) -> dict[str, Any]:
         """Registra una decisión (ADR-lite). `as_agent=True` ⇒ nace `proposed`. `repo_link_id` la
-        ata a un vínculo de repo (ADR-0016) para la trazabilidad IA→código."""
+        ata a un vínculo de repo (ADR-0016) para la trazabilidad IA→código. `supersedes_id`: la
+        decisión aceptada que esta sustituye (FNV-325)."""
         payload: dict[str, Any] = {
             "title": title,
             "rationale": rationale,
@@ -428,10 +460,32 @@ class FoundryClient:
         }
         if repo_link_id:
             payload["repo_link_id"] = repo_link_id
+        if supersedes_id:
+            payload["supersedes_id"] = supersedes_id
         return await self._obj(
             "POST",
             f"/initiatives/{initiative_id}/tasks/{task_id}/decisions",
             json=payload,
+        )
+
+    async def edit_task_decision(
+        self, initiative_id: str, task_id: str, decision_id: str, title: str, rationale: str
+    ) -> dict[str, Any]:
+        """Corrige título y fundamento. Como IA: el backend solo lo deja si sigue propuesta."""
+        return await self._obj(
+            "PUT",
+            f"/initiatives/{initiative_id}/tasks/{task_id}/decisions/{decision_id}",
+            json={"title": title, "rationale": rationale, "as_agent": True},
+        )
+
+    async def retire_task_decision(
+        self, initiative_id: str, task_id: str, decision_id: str, superseded_by: str | None
+    ) -> dict[str, Any]:
+        """Retira una decisión aceptada que dejó de regir (FNV-325): veredicto humano."""
+        return await self._obj(
+            "POST",
+            f"/initiatives/{initiative_id}/tasks/{task_id}/decisions/{decision_id}/retire",
+            json={"superseded_by": superseded_by},
         )
 
     async def list_task_criteria(
